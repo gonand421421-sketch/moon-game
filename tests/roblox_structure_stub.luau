@@ -138,8 +138,29 @@ for _,service in ipairs({'Workspace','ReplicatedStorage','ServerScriptService'})
 end
 local net=services.ReplicatedStorage.LunarCleanup
 local Environment=require(net.Environment)
+local texture=require(net.Config).Environment.SkyTexture
+local function blackFaces(object)
+ for _,face in ipairs({'Bk','Dn','Ft','Lf','Rt','Up'}) do assert(object['Skybox'..face]==texture,'unconfigured sky face') end
+end
+local originalSky=services.Lighting.LunarSky
+blackFaces(originalSky)
+-- No client-created Sky, archive or moving geometry. Local-only conflicts get black faces in place.
+originalSky.Parent=nil
+Environment.StartClient()
+assert(services.Lighting.LunarSky==nil,'client must not create a competing Sky')
+originalSky.Parent=services.Lighting
+assert(services.Lighting.LunarSky==originalSky)
+local clientSky=Instance.new('Sky'); clientSky.Name='LocalConflict'; clientSky.Parent=services.Lighting
+blackFaces(clientSky); assert(clientSky.Parent==services.Lighting)
+clientSky.SkyboxUp='BLUE'; blackFaces(clientSky)
+local localAtmosphere=Instance.new('Atmosphere'); localAtmosphere.Density=0.4; localAtmosphere.Haze=2; localAtmosphere.Glare=1
+localAtmosphere.Parent=services.Lighting; assert(localAtmosphere.Density==0 and localAtmosphere.Haze==0 and localAtmosphere.Glare==0)
+local localClouds=Instance.new('Clouds'); localClouds.Enabled=true; localClouds.Parent=terrain
+assert(not localClouds.Enabled and localClouds.Parent==terrain)
+localClouds.Enabled=true; assert(not localClouds.Enabled)
 local archive=services.ServerStorage.LunarCleanupOriginalEnvironment.LightingBeforeOverhaul
-Environment.Start(archive)
+Environment.Start(archive); flush()
+assert(clientSky.Parent==archive and localAtmosphere.Parent==archive and localClouds.Parent==archive)
 local sky=Instance.new('Sky'); sky.Name='InjectedSky'; sky.Parent=services.Lighting
 local atmosphere=Instance.new('Atmosphere'); atmosphere.Parent=services.Lighting
 local clouds=Instance.new('Clouds'); clouds.Enabled=true; clouds.Parent=terrain
@@ -149,16 +170,15 @@ assert(sky.Parent==archive and atmosphere.Parent==archive)
 assert(clouds.Parent==archive and clouds.Enabled==false)
 assert(services.Lighting.Brightness==3.5 and services.Lighting.ClockTime==15.7)
 assert(services.Lighting.EnvironmentSpecularScale==0)
+-- Float-rounded engine property readings must not cause repeated assignments/repair cycles.
+services.Lighting.Brightness=3.50000001; flush(); assert(services.Lighting.Brightness==3.50000001)
 local lunar=services.Lighting.LunarSky; lunar:Destroy(); flush()
 assert(services.Lighting.LunarSky and services.Lighting.LunarSky~=lunar)
-local localSpace,walls=Environment.CreateBackdrop(Workspace)
-assert(#walls==6)
-for _,wall in ipairs(walls) do
- assert(wall.Part.Parent==localSpace and wall.Part.Anchored and wall.Part.CastShadow==false)
- assert(wall.Part.CanCollide==false and wall.Part.CanQuery==false and wall.Part.CanTouch==false)
- assert(wall.Part.Color.R==0 and wall.Part.Color.G==0 and wall.Part.Color.B==0)
+blackFaces(services.Lighting.LunarSky)
+services.Lighting.LunarSky.SkyboxFt='BLUE'; flush(); blackFaces(services.Lighting.LunarSky)
+assert(Environment.CreateBackdrop==nil)
+assert(#spawned==1,'only the client preload task should be spawned; no periodic sky loops')
+for _,object in ipairs(Workspace:GetDescendants()) do
+ assert(object.Name~='SpaceBackdrop' and object.Name~='BlackSpace' and object.Name~='LunarCleanupLocalSpace')
 end
--- Removing server backdrop parts cannot remove the independently created client backdrop.
-for _,object in ipairs(Workspace.LunarCleanup:GetChildren()) do if object.Name=='SpaceBackdrop' then object:Destroy() end end
-assert(#localSpace:GetChildren()==6)
-print('STRUCTURE PASS: repeat generation, voxels, patch grid, anchors, runtime environment repair, independent local backdrop')
+print('STRUCTURE PASS: repeat generation, voxels, grid, native black faces, one Sky authority, no geometry/timers, float tolerance')

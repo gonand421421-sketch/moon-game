@@ -1,6 +1,11 @@
 -- tools/validate_generator.py prepends actual Config, Economy, and profile sanitizer.
 local function near(a,b) assert(math.abs(a-b)<1e-7,string.format('%.12f ~= %.12f',a,b)) end
 local function profile(storage) return {Money=0,Dust=0,DustCarry=0,Storage=storage or 0} end
+-- The actual starting tool must meet the 4–5 second center-contact target.
+assert(C.PatchHealth/C.Tools[1].Power>=4 and C.PatchHealth/C.Tools[1].Power<=5)
+local start=profile(); local patch=C.PatchHealth
+for i=1,50 do patch=E.Scrub(start,patch,C.Tools[1].Power,0.1,0,C.Tools[1].Radius) end
+near(patch,0); near(start.Dust+start.DustCarry,C.PatchHealth*C.DustPerHealth)
 -- Slow scrubs must fade immediately, with no one-unit floor and no lost sub-unit rewards.
 local d=profile(); local health=12
 local remaining,removed=E.Scrub(d,health,1.2,0.1,0,0.48)

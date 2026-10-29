@@ -18,8 +18,13 @@ embedded = dict(re.findall(r'(config|environment|economy|server|client)\.Source\
 assert set(embedded) == {'config', 'environment', 'economy', 'server', 'client'}
 assert "GetDataStore('LunarCleanup_v1')" in embedded['server']
 assert "{'Scrub','Action','Feedback'}" in source
-assert "Environment.CreateBackdrop(workspace)" in embedded['client']
-assert embedded['client'].index('Environment.CreateBackdrop') < embedded['client'].index("workspace:WaitForChild('LunarCleanup')")
+assert 'CreateBackdrop' not in embedded['environment']
+assert 'LunarCleanupSky' not in embedded['client']
+assert 'SpaceBackdrop' not in source
+assert "SkyTexture='rbxasset://textures/blackBkg_square.png'" in embedded['config']
+assert 'while true' not in embedded['environment']
+assert 'Environment.StartClient()' in embedded['client']
+assert embedded['client'].index('Environment.StartClient()') < embedded['client'].index("workspace:WaitForChild('LunarCleanup')")
 # Test actual production sanitization, not a copied reimplementation.
 sanitize = embedded['server'].split('local function cleanInteger', 1)[1].split('local function tell', 1)[0]
 sanitize = 'local function cleanInteger' + sanitize

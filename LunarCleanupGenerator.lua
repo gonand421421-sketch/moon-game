@@ -32,17 +32,18 @@ local Config = {
  DustPerHealth=0.5, SellPrice=2, SpeedPerLevel=0.20, RadiusPerLevel=0.10,
  Falloff=0.45, MaxScrubDelta=0.14,
  Tools = {
-  {Name='TOOTHBRUSH', Radius=0.48, Power=1.2, Price=0},
-  {Name='REGOLITH BRUSH', Radius=0.85, Power=1.7, Price=1000},
-  {Name='INDUSTRIAL SCRUBBER', Radius=1.35, Power=2.6, Price=4500},
+  {Name='TOOTHBRUSH', Radius=0.48, Power=12/4.5, Price=0},
+  {Name='REGOLITH BRUSH', Radius=0.85, Power=4, Price=2000},
+  {Name='INDUSTRIAL SCRUBBER', Radius=1.35, Power=6, Price=9000},
  },
- SpeedPrices={220,650,2100,5500}, RadiusPrices={300,950,4200}, StoragePrices={180,550,1200,3800,7800},
+ SpeedPrices={440,1300,4200,11000}, RadiusPrices={600,1900,8400}, StoragePrices={360,1100,2400,7600,15600},
  -- Every level is at least as large as the old bag: no legacy carried dust is discarded.
  StorageCapacities={100,260,560,1000,1700,2600},
  -- Timing-model assumptions only, never an artificial earning cap or wait timer.
  Timing={ContactEfficiency=0.65, SellRoundTripSeconds=12},
  Environment={
-  BackdropDistance=620,
+  -- Verified client-packaged RGB-black image; no uploaded asset or network dependency.
+  SkyTexture='rbxasset://textures/blackBkg_square.png',
   Lighting={ClockTime=15.7,GeographicLatitude=12,Brightness=3.5,GlobalShadows=true,
    ShadowSoftness=0.06,ExposureCompensation=-0.35,
    Ambient=Color3.fromRGB(9,11,16),OutdoorAmbient=Color3.fromRGB(24,26,32),
@@ -59,37 +60,88 @@ environment.Source=[==[
 local Lighting=game:GetService('Lighting')
 local C=require(script.Parent.Config)
 local Environment={}
-function Environment.Apply(archive)
+local faces={'Bk','Dn','Ft','Lf','Rt','Up'}
+local function equal(a,b)
+ -- Roblox numeric properties may round to float32: exact Lua-double comparison
+ -- can repeatedly assign the same value and keep a repair loop alive.
+ if type(a)=='number' and type(b)=='number' then return math.abs(a-b)<0.0001 end
+ return a==b
+end
+local function profile()
  for property,value in pairs(C.Environment.Lighting) do
-  if Lighting[property]~=value then Lighting[property]=value end
+  if not equal(Lighting[property],value) then Lighting[property]=value end
  end
+end
+local function configure(object)
+ if object:IsA('Sky') then
+  for _,face in ipairs(faces) do
+   local property='Skybox'..face
+   if object[property]~=C.Environment.SkyTexture then object[property]=C.Environment.SkyTexture end
+  end
+  if object.CelestialBodiesShown then object.CelestialBodiesShown=false end
+  if object.StarCount~=0 then object.StarCount=0 end
+ elseif object:IsA('Atmosphere') then
+  for _,property in ipairs({'Density','Haze','Glare'}) do
+   if not equal(object[property],0) then object[property]=0 end
+  end
+ elseif object:IsA('Clouds') then
+  if object.Enabled then object.Enabled=false end
+ end
+end
+function Environment.Apply(archive)
+ -- Edit/server authority only. Clients never create, delete or reparent replicated skies.
+ profile()
  local sky=Lighting:FindFirstChild('LunarSky')
  if not sky or not sky:IsA('Sky') then
   if sky then sky.Parent=archive end
   sky=Instance.new('Sky'); sky.Name='LunarSky'; sky:SetAttribute('LunarCleanupOwned',true)
-  sky.CelestialBodiesShown=false; sky.StarCount=0
-  for _,face in ipairs({'Bk','Dn','Ft','Lf','Rt','Up'}) do sky['Skybox'..face]='' end
+  configure(sky) -- Fully configured before becoming active; no default-blue intermediate state.
   sky.Parent=Lighting
- end
- sky.CelestialBodiesShown=false; sky.StarCount=0
- -- Empty textures are NOT a black sky. Opaque, non-streamed client geometry supplies
- -- the actual black background; zero environment contribution prevents blue cubemap reflections.
- local function quarantine(object)
-  warn('[LunarCleanup environment] Preserving conflicting '..object.ClassName..' at '..object:GetFullName())
-  if object:IsA('Clouds') then
-   if object:GetAttribute('LunarCleanupOriginalEnabled')==nil then object:SetAttribute('LunarCleanupOriginalEnabled',object.Enabled) end
-   object.Enabled=false
-  end
-  object.Parent=archive
- end
+ else configure(sky) end
  for _,object in ipairs(Lighting:GetChildren()) do
-  if (object:IsA('Sky') and object~=sky) or object:IsA('Atmosphere') or object:IsA('Clouds') then quarantine(object) end
+  if (object:IsA('Sky') and object~=sky) or object:IsA('Atmosphere') or object:IsA('Clouds') then
+   warn('[LunarCleanup environment] Server preserving conflicting '..object.ClassName..' at '..object:GetFullName())
+   if object:IsA('Clouds') then
+    if object:GetAttribute('LunarCleanupOriginalEnabled')==nil then object:SetAttribute('LunarCleanupOriginalEnabled',object.Enabled) end
+   end
+   configure(object); object.Parent=archive
+  end
  end
  for _,object in ipairs(workspace.Terrain:GetChildren()) do
-  if object:IsA('Clouds') or object:IsA('Atmosphere') then quarantine(object) end
+  if object:IsA('Clouds') or object:IsA('Atmosphere') then
+   warn('[LunarCleanup environment] Server preserving '..object.ClassName..' at '..object:GetFullName())
+   if object:IsA('Clouds') and object:GetAttribute('LunarCleanupOriginalEnabled')==nil then object:SetAttribute('LunarCleanupOriginalEnabled',object.Enabled) end
+   configure(object); object.Parent=archive
+  end
  end
 end
+local function watch(profileChanged,topologyChanged)
+ local bound=setmetatable({},{__mode='k'})
+ local function attach(object)
+  if not (object:IsA('Sky') or object:IsA('Atmosphere') or object:IsA('Clouds')) then return end
+  if object:IsA('Clouds') and object:GetAttribute('LunarCleanupOriginalEnabled')==nil then
+   object:SetAttribute('LunarCleanupOriginalEnabled',object.Enabled)
+  end
+  configure(object)
+  if bound[object] then return end
+  bound[object]=true
+  local busy=false
+  object.Changed:Connect(function()
+   if busy or (object.Parent~=Lighting and object.Parent~=workspace.Terrain) then return end
+   busy=true; configure(object); busy=false
+  end)
+ end
+ Lighting.ChildAdded:Connect(function(object) attach(object); topologyChanged() end)
+ Lighting.ChildRemoved:Connect(topologyChanged)
+ workspace.Terrain.ChildAdded:Connect(function(object) attach(object); topologyChanged() end)
+ Lighting.Changed:Connect(function(property)
+  if C.Environment.Lighting[property]~=nil then profileChanged() end
+ end)
+ for _,object in ipairs(Lighting:GetChildren()) do attach(object) end
+ for _,object in ipairs(workspace.Terrain:GetChildren()) do attach(object) end
+end
 function Environment.Start(archive)
+ -- A single server owns Sky identity. Event-driven repairs only; no two-second polling.
  Environment.Apply(archive)
  local queued=false
  local function repair()
@@ -97,25 +149,28 @@ function Environment.Start(archive)
   queued=true
   task.defer(function() Environment.Apply(archive); queued=false end)
  end
- Lighting.ChildAdded:Connect(repair)
- Lighting.ChildRemoved:Connect(repair)
- Lighting.Changed:Connect(function(property) if C.Environment.Lighting[property]~=nil then repair() end end)
- workspace.Terrain.ChildAdded:Connect(repair)
- -- Catch local or server scripts reparenting environmental objects after startup.
- task.spawn(function() while true do task.wait(2); Environment.Apply(archive) end end)
+ watch(repair,repair)
 end
-function Environment.CreateBackdrop(parent)
- local model=Instance.new('Model'); model.Name='LunarCleanupLocalSpace'; model.Parent=parent
- local walls={}; local d=C.Environment.BackdropDistance
- for _,offset in ipairs({Vector3.new(0,d,0),Vector3.new(0,-d,0),Vector3.new(d,0,0),Vector3.new(-d,0,0),Vector3.new(0,0,d),Vector3.new(0,0,-d)}) do
-  local size=Vector3.new(d*2+4,d*2+4,2)
-  if offset.Y~=0 then size=Vector3.new(d*2+4,2,d*2+4) elseif offset.X~=0 then size=Vector3.new(2,d*2+4,d*2+4) end
-  local wall=Instance.new('Part'); wall.Name='BlackSpace'; wall.Size=size
-  wall.Anchored=true; wall.CanCollide=false; wall.CanTouch=false; wall.CanQuery=false; wall.CastShadow=false
-  wall.Material=Enum.Material.Neon; wall.Color=Color3.new(0,0,0); wall.CFrame=CFrame.new(offset); wall.Parent=model
-  table.insert(walls,{Part=wall,Offset=offset})
+function Environment.StartClient()
+ -- Client handles local-only effects and non-replicated Lighting settings, but never
+ -- reparents the server's Sky. Any additional local Sky gets the same black faces.
+ profile()
+ local busy=false
+ local function restoreProfile()
+  if busy then return end
+  busy=true; profile(); busy=false
  end
- return model,walls
+ watch(restoreProfile,function() end)
+ -- Preload a shipped file, not an external download. Report failures instead of
+ -- silently substituting an empty sky or starting another geometry overlay.
+ task.spawn(function()
+  local ok,err=pcall(function()
+   game:GetService('ContentProvider'):PreloadAsync({C.Environment.SkyTexture},function(id,status)
+    if status~=Enum.AssetFetchStatus.Success then warn('[LunarCleanup sky] Built-in texture load status: '..tostring(status)) end
+   end)
+  end)
+  if not ok then warn('[LunarCleanup sky] Preload failed: '..tostring(err)) end
+ end)
 end
 return Environment
 ]==]
@@ -391,15 +446,8 @@ local lightingOK = pcall(function()
 end)
 if not lightingOK then warn('Select Realistic lighting in Lighting properties if available in your Studio version.') end
 require(environment).Apply(originalLighting)
--- Edit-mode backdrop only. Runtime clients build a camera-relative backdrop locally,
--- because far-away Workspace parts can stream out and expose Roblox's default blue sky.
--- Six black, non-queryable walls enclose the play area without external sky textures.
-for _, v in ipairs({Vector3.new(0,800,0),Vector3.new(0,-800,0),Vector3.new(800,0,0),Vector3.new(-800,0,0),Vector3.new(0,0,800),Vector3.new(0,0,-800)}) do
- local size=Vector3.new(1600,1600,2)
- if v.Y~=0 then size=Vector3.new(1600,2,1600) elseif v.X~=0 then size=Vector3.new(2,1600,1600) end
- local wall=part('SpaceBackdrop',size,CFrame.new(v),Color3.new(0,0,0),Enum.Material.Neon)
- wall.CanCollide=false; wall.CanQuery=false; wall.CastShadow=false
-end
+-- Native skybox only: no world walls, camera-relative parts, render-step sky updates,
+-- far-plane/culling dependence, or cleanup-triggered background changes.
 local color=Instance.new('ColorCorrectionEffect'); color.Name='LunarGrade'; color.Saturation=-0.24
 color.Contrast=0.16; color:SetAttribute('LunarCleanupOwned',true); color.Parent=Lighting
 local bloom=Instance.new('BloomEffect'); bloom.Name='LunarOptics'; bloom.Intensity=0.08
@@ -627,14 +675,7 @@ local Players=game:GetService('Players'); local RS=game:GetService('ReplicatedSt
 local UIS=game:GetService('UserInputService'); local Run=game:GetService('RunService')
 local player=Players.LocalPlayer; local net=RS:WaitForChild('LunarCleanup'); local C=require(net:WaitForChild('Config'))
 local Environment=require(net:WaitForChild('Environment'))
-local archive=Instance.new('Folder'); archive.Name='LunarCleanupClientEnvironmentArchive'; archive.Parent=net
-Environment.Start(archive)
-local space,spaceWalls=Environment.CreateBackdrop(workspace)
--- Install before waiting for streamed map geometry: sky readiness does not depend on the yard.
-Run:BindToRenderStep('LunarCleanupSky',Enum.RenderPriority.Camera.Value+1,function()
- local camera=workspace.CurrentCamera
- if camera then for _,wall in ipairs(spaceWalls) do wall.Part.CFrame=CFrame.new(camera.CFrame.Position+wall.Offset) end end
-end)
+Environment.StartClient()
 local map=workspace:WaitForChild('LunarCleanup'); local patches=map:WaitForChild('Patches')
 
 local gui=Instance.new('ScreenGui'); gui.Name='LunarCleanupHUD'; gui.ResetOnSpawn=false; gui.IgnoreGuiInset=false
@@ -835,7 +876,7 @@ Run:BindToRenderStep('LunarCleanupCamera',Enum.RenderPriority.Camera.Value+1,fun
  else UIS.MouseIconEnabled=false end
  cross.TextColor3=os.clock()<flashUntil and Color3.fromRGB(180,215,208) or white
  local params=RaycastParams.new(); params.FilterType=Enum.RaycastFilterType.Exclude
- params.FilterDescendantsInstances={char or view,view,puff,space}
+ params.FilterDescendantsInstances={char or view,view,puff}
  aimTrack.Visible=false
  local hit=workspace:Raycast(camera.CFrame.Position,camera.CFrame.LookVector*C.Range,params)
  if hit and hit.Instance:IsDescendantOf(patches) then
