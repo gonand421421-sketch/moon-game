@@ -23,19 +23,126 @@ for _, name in ipairs({'Scrub','Action','Feedback'}) do
 end
 local config = Instance.new('ModuleScript'); config.Name = 'Config'; config.Parent = net
 config.Source = [==[
-return {
+-- BALANCE CONFIGURATION: all pacing values live here. Save schema stays v1.
+-- Power = health removed per second per patch before distance falloff.
+-- Yield * SellPrice = credits per health (0.5 * 2 = 1).
+local Config = {
  Version = 1, PatchSize = 0.85, Columns = 14, Rows = 14, PatchHealth = 12,
- Range = 14, Tick = 0.10, ResetSeconds = 35,
+ Range = 14, Tick = 0.10, ResetSeconds = 12,
+ DustPerHealth=0.5, SellPrice=2, SpeedPerLevel=0.20, RadiusPerLevel=0.10,
+ Falloff=0.45, MaxScrubDelta=0.14,
  Tools = {
-  {Name='TOOTHBRUSH', Radius=0.48, Power=16, Price=0},
-  {Name='REGOLITH BRUSH', Radius=1.05, Power=24, Price=240},
-  {Name='INDUSTRIAL SCRUBBER', Radius=1.8, Power=34, Price=1100},
+  {Name='TOOTHBRUSH', Radius=0.48, Power=1.2, Price=0},
+  {Name='REGOLITH BRUSH', Radius=0.85, Power=1.7, Price=1000},
+  {Name='INDUSTRIAL SCRUBBER', Radius=1.35, Power=2.6, Price=4500},
  },
- SpeedPrices={90,260,650,1400}, RadiusPrices={120,340,800}, StoragePrices={70,200,520,1100,2200},
- Capacity=function(level) return 100 + level*100 + level*level*25 end,
+ SpeedPrices={220,650,2100,5500}, RadiusPrices={300,950,4200}, StoragePrices={180,550,1200,3800,7800},
+ -- Every level is at least as large as the old bag: no legacy carried dust is discarded.
+ StorageCapacities={100,260,560,1000,1700,2600},
+ -- Timing-model assumptions only, never an artificial earning cap or wait timer.
+ Timing={ContactEfficiency=0.65, SellRoundTripSeconds=12},
+ Environment={
+  BackdropDistance=620,
+  Lighting={ClockTime=15.7,GeographicLatitude=12,Brightness=3.5,GlobalShadows=true,
+   ShadowSoftness=0.06,ExposureCompensation=-0.35,
+   Ambient=Color3.fromRGB(9,11,16),OutdoorAmbient=Color3.fromRGB(24,26,32),
+   EnvironmentDiffuseScale=0,EnvironmentSpecularScale=0,
+   FogStart=1400,FogEnd=1800,FogColor=Color3.new(0,0,0)},
+ },
 }
+Config.Capacity=function(level) return Config.StorageCapacities[level+1] end
+return Config
 ]==]
 local C = require(config)
+local environment=Instance.new('ModuleScript'); environment.Name='Environment'; environment.Parent=net
+environment.Source=[==[
+local Lighting=game:GetService('Lighting')
+local C=require(script.Parent.Config)
+local Environment={}
+function Environment.Apply(archive)
+ for property,value in pairs(C.Environment.Lighting) do
+  if Lighting[property]~=value then Lighting[property]=value end
+ end
+ local sky=Lighting:FindFirstChild('LunarSky')
+ if not sky or not sky:IsA('Sky') then
+  if sky then sky.Parent=archive end
+  sky=Instance.new('Sky'); sky.Name='LunarSky'; sky:SetAttribute('LunarCleanupOwned',true)
+  sky.CelestialBodiesShown=false; sky.StarCount=0
+  for _,face in ipairs({'Bk','Dn','Ft','Lf','Rt','Up'}) do sky['Skybox'..face]='' end
+  sky.Parent=Lighting
+ end
+ sky.CelestialBodiesShown=false; sky.StarCount=0
+ -- Empty textures are NOT a black sky. Opaque, non-streamed client geometry supplies
+ -- the actual black background; zero environment contribution prevents blue cubemap reflections.
+ local function quarantine(object)
+  warn('[LunarCleanup environment] Preserving conflicting '..object.ClassName..' at '..object:GetFullName())
+  if object:IsA('Clouds') then
+   if object:GetAttribute('LunarCleanupOriginalEnabled')==nil then object:SetAttribute('LunarCleanupOriginalEnabled',object.Enabled) end
+   object.Enabled=false
+  end
+  object.Parent=archive
+ end
+ for _,object in ipairs(Lighting:GetChildren()) do
+  if (object:IsA('Sky') and object~=sky) or object:IsA('Atmosphere') or object:IsA('Clouds') then quarantine(object) end
+ end
+ for _,object in ipairs(workspace.Terrain:GetChildren()) do
+  if object:IsA('Clouds') or object:IsA('Atmosphere') then quarantine(object) end
+ end
+end
+function Environment.Start(archive)
+ Environment.Apply(archive)
+ local queued=false
+ local function repair()
+  if queued then return end
+  queued=true
+  task.defer(function() Environment.Apply(archive); queued=false end)
+ end
+ Lighting.ChildAdded:Connect(repair)
+ Lighting.ChildRemoved:Connect(repair)
+ Lighting.Changed:Connect(function(property) if C.Environment.Lighting[property]~=nil then repair() end end)
+ workspace.Terrain.ChildAdded:Connect(repair)
+ -- Catch local or server scripts reparenting environmental objects after startup.
+ task.spawn(function() while true do task.wait(2); Environment.Apply(archive) end end)
+end
+function Environment.CreateBackdrop(parent)
+ local model=Instance.new('Model'); model.Name='LunarCleanupLocalSpace'; model.Parent=parent
+ local walls={}; local d=C.Environment.BackdropDistance
+ for _,offset in ipairs({Vector3.new(0,d,0),Vector3.new(0,-d,0),Vector3.new(d,0,0),Vector3.new(-d,0,0),Vector3.new(0,0,d),Vector3.new(0,0,-d)}) do
+  local size=Vector3.new(d*2+4,d*2+4,2)
+  if offset.Y~=0 then size=Vector3.new(d*2+4,2,d*2+4) elseif offset.X~=0 then size=Vector3.new(2,d*2+4,d*2+4) end
+  local wall=Instance.new('Part'); wall.Name='BlackSpace'; wall.Size=size
+  wall.Anchored=true; wall.CanCollide=false; wall.CanTouch=false; wall.CanQuery=false; wall.CastShadow=false
+  wall.Material=Enum.Material.Neon; wall.Color=Color3.new(0,0,0); wall.CFrame=CFrame.new(offset); wall.Parent=model
+  table.insert(walls,{Part=wall,Offset=offset})
+ end
+ return model,walls
+end
+return Environment
+]==]
+local economy=Instance.new('ModuleScript'); economy.Name='Economy'; economy.Parent=net
+economy.Source=[==[
+local C=require(script.Parent.Config)
+local Economy={}
+-- Server-only mutations; exported separately so fractional accounting can be tested.
+function Economy.Scrub(data,health,power,seconds,distance,radius)
+ local carry=data.DustCarry or 0
+ local room=C.Capacity(data.Storage)-data.Dust-carry
+ local damage=power*math.min(seconds,C.MaxScrubDelta)*(1-C.Falloff*math.min(distance/radius,1))
+ local removed=math.max(0,math.min(health,room/C.DustPerHealth,damage))
+ local reward=carry+removed*C.DustPerHealth
+ local earned=math.floor(reward+1e-9)
+ data.Dust+=earned; data.DustCarry=math.max(0,reward-earned)
+ return math.max(0,health-removed),removed,earned
+end
+function Economy.Sell(data)
+ local value=data.Dust*C.SellPrice
+ data.Money+=value; data.Dust=0
+ -- Fractional dust stays in the profile; frequent selling cannot erase it or mint it twice.
+ return value
+end
+return Economy
+]==]
+
 local function part(name, size, cf, color, material, parent)
  local p = Instance.new('Part'); p.Name=name; p.Size=size; p.CFrame=cf; p.Color=color
  p.Material=material or Enum.Material.Metal; p.Anchored=true; p.TopSurface=Enum.SurfaceType.Smooth
@@ -62,6 +169,23 @@ if not preservation then
  original.Name='TerrainBeforeOverhaul'; original.Parent=preservation
  local tint=Instance.new('Color3Value'); tint.Name='OriginalSandColor'; tint.Value=terrain:GetMaterialColor(Enum.Material.Sand); tint.Parent=preservation
  preservation.Parent=ServerStorage
+end
+-- Read-only inventory identifies conflicts in the user's actual Studio place.
+print('[LunarCleanup audit] StreamingEnabled = '..tostring(Workspace.StreamingEnabled))
+for _,root in ipairs({Lighting,terrain}) do
+ for _,object in ipairs(root:GetDescendants()) do
+  if object:IsA('Sky') or object:IsA('Atmosphere') or object:IsA('Clouds') then
+   print('[LunarCleanup audit] '..object.ClassName..' : '..object:GetFullName())
+  end
+ end
+end
+for _,object in ipairs(game:GetDescendants()) do
+ if (object:IsA('BaseScript') or object:IsA('ModuleScript')) and not object:IsDescendantOf(net) then
+  local ok,source=pcall(function() return object.Source end)
+  if ok and (source:find('Lighting') or source:find('Skybox') or source:find('Atmosphere') or source:find('Clouds')) then
+   warn('[LunarCleanup audit] Review environment references in '..object:GetFullName()..' (not automatically disabled)')
+  end
+ end
 end
 -- Preserve template sky/haze/post effects rather than stacking them with lunar lighting.
 local originalLighting=preservation:FindFirstChild('LightingBeforeOverhaul')
@@ -266,16 +390,9 @@ local lightingOK = pcall(function()
  Lighting.PrioritizeLightingQuality=true
 end)
 if not lightingOK then warn('Select Realistic lighting in Lighting properties if available in your Studio version.') end
-Lighting.ClockTime=15.7; Lighting.GeographicLatitude=12; Lighting.Brightness=3.5
-Lighting.GlobalShadows=true; Lighting.ShadowSoftness=0.06; Lighting.ExposureCompensation=-0.35
-Lighting.Ambient=Color3.fromRGB(9,11,16); Lighting.OutdoorAmbient=Color3.fromRGB(24,26,32)
-Lighting.EnvironmentDiffuseScale=0.15; Lighting.EnvironmentSpecularScale=0.5
-Lighting.FogStart=1400; Lighting.FogEnd=1800; Lighting.FogColor=Color3.new(0,0,0)
--- No atmospheric haze: the Moon has essentially no atmosphere. Particles are local impacts only.
--- Sky has no asset IDs; black backdrop walls create a dark lunar sky.
-local sky=Instance.new('Sky'); sky.Name='LunarSky'; sky.CelestialBodiesShown=false; sky.StarCount=0
-sky:SetAttribute('LunarCleanupOwned',true); sky.Parent=Lighting
-for _, face in ipairs({'Bk','Dn','Ft','Lf','Rt','Up'}) do sky['Skybox'..face]='' end
+require(environment).Apply(originalLighting)
+-- Edit-mode backdrop only. Runtime clients build a camera-relative backdrop locally,
+-- because far-away Workspace parts can stream out and expose Roblox's default blue sky.
 -- Six black, non-queryable walls enclose the play area without external sky textures.
 for _, v in ipairs({Vector3.new(0,800,0),Vector3.new(0,-800,0),Vector3.new(800,0,0),Vector3.new(-800,0,0),Vector3.new(0,0,800),Vector3.new(0,0,-800)}) do
  local size=Vector3.new(1600,1600,2)
@@ -297,6 +414,9 @@ local DSS=game:GetService('DataStoreService')
 local Http=game:GetService('HttpService')
 local net=RS:WaitForChild('LunarCleanup'); local C=require(net.Config)
 local map=workspace:WaitForChild('LunarCleanup'); local folder=map:WaitForChild('Patches')
+local Economy=require(net.Economy)
+local original=game:GetService('ServerStorage'):WaitForChild('LunarCleanupOriginalEnvironment')
+require(net.Environment).Start(original:WaitForChild('LightingBeforeOverhaul'))
 local store=DSS:GetDataStore('LunarCleanup_v1')
 local session=game.JobId..':'..Http:GenerateGUID(false)
 local profiles={}; local patches={}; local cells={}; local deckState={}
@@ -314,6 +434,7 @@ end
 local function sanitize(data)
  data=type(data)=='table' and data or {}
  return {Money=cleanInteger(data.Money,100000000),Dust=cleanInteger(data.Dust,1000000),
+ DustCarry=type(data.DustCarry)=='number' and data.DustCarry==data.DustCarry and math.clamp(data.DustCarry,0,0.999999999) or 0,
  Tool=math.max(1,cleanInteger(data.Tool,#C.Tools)),Speed=cleanInteger(data.Speed,#C.SpeedPrices),
  Radius=cleanInteger(data.Radius,#C.RadiusPrices),Storage=cleanInteger(data.Storage,#C.StoragePrices)}
 end
@@ -363,7 +484,8 @@ local function load(p)
   task.wait(attempt)
  end
  if not p.Parent then if acquired then save(p,true) end; profiles[p]=nil; return end
- s.data.Dust=math.min(s.data.Dust,C.Capacity(s.data.Storage)); sync(p,s)
+ -- Keep legacy carried dust even if a later balance change lowers capacity: sell normally.
+ sync(p,s)
  if not acquired then tell(p,'SESSION ONLY — saving unavailable or profile in use. Existing saved data will not be overwritten.') end
 end
 Players.PlayerAdded:Connect(function(p)
@@ -390,8 +512,8 @@ local function nearby(p,target)
 end
 local function sell(p)
  local s=profiles[p]; if not s or not p:GetAttribute('DataReady') or not nearby(p,map.Depot) then return end
- if s.data.Dust<=0 then tell(p,'Storage is empty. Scrub a reclamation deck first.'); return end
- local value=s.data.Dust; s.data.Money+=value; s.data.Dust=0; sync(p,s)
+ if s.data.Dust<=0 then tell(p,'Collect at least 1 dust unit before selling. Keep scrubbing.'); return end
+ local value=Economy.Sell(s.data); sync(p,s)
  tell(p,'Sold lunar dust for $'..value,'Sold')
 end
 map.Depot.Sell.Triggered:Connect(sell)
@@ -432,8 +554,8 @@ net.Scrub.OnServerEvent:Connect(function(p,origin,direction)
  if (head.Position-hit.Position).Magnitude>C.Range then return end
  local sight=workspace:Raycast(head.Position,hit.Position-head.Position,params)
  if sight and sight.Instance~=hit.Instance and (sight.Position-hit.Position).Magnitude>0.12 then return end
- local tool=C.Tools[s.data.Tool]; local radius=tool.Radius*(1+0.15*s.data.Radius)
- local power=tool.Power*(1+0.3*s.data.Speed)*math.min(dt,0.14)
+ local tool=C.Tools[s.data.Tool]; local radius=tool.Radius*(1+C.RadiusPerLevel*s.data.Radius)
+ local power=tool.Power*(1+C.SpeedPerLevel*s.data.Speed)
  local center=hit.Position; local deck=hit.Instance:GetAttribute('Deck'); local total=0; local touched=0
  local cx,cz=math.floor(center.X/C.PatchSize),math.floor(center.Z/C.PatchSize)
  local steps=math.ceil((radius+C.PatchSize)/C.PatchSize)
@@ -445,11 +567,13 @@ net.Scrub.OnServerEvent:Connect(function(p,origin,direction)
     local health=patch:GetAttribute('Health')
     local room=C.Capacity(s.data.Storage)-s.data.Dust
     if health>0 and room>0 then
-     local amount=math.min(health,room,math.max(1,math.floor(power*(1-0.45*math.min(distance/radius,1)))))
-     health-=amount; s.data.Dust+=amount; total+=amount; touched+=1
+     local previous=health
+     local amount
+     health,amount=Economy.Scrub(s.data,health,power,dt,distance,radius)
+     total+=amount; touched+=1
      patch:SetAttribute('Health',health); patch.Transparency=1-health/C.PatchHealth
      -- Invisible patches remain queryable so a brush can sweep through cleaned areas.
-     if health==0 then
+     if health==0 and previous>0 then
       deckState[deck].remaining-=1
       if deckState[deck].remaining==0 then deckState[deck].resetAt=now+C.ResetSeconds end
      end
@@ -502,7 +626,17 @@ client.Source=[==[
 local Players=game:GetService('Players'); local RS=game:GetService('ReplicatedStorage')
 local UIS=game:GetService('UserInputService'); local Run=game:GetService('RunService')
 local player=Players.LocalPlayer; local net=RS:WaitForChild('LunarCleanup'); local C=require(net:WaitForChild('Config'))
+local Environment=require(net:WaitForChild('Environment'))
+local archive=Instance.new('Folder'); archive.Name='LunarCleanupClientEnvironmentArchive'; archive.Parent=net
+Environment.Start(archive)
+local space,spaceWalls=Environment.CreateBackdrop(workspace)
+-- Install before waiting for streamed map geometry: sky readiness does not depend on the yard.
+Run:BindToRenderStep('LunarCleanupSky',Enum.RenderPriority.Camera.Value+1,function()
+ local camera=workspace.CurrentCamera
+ if camera then for _,wall in ipairs(spaceWalls) do wall.Part.CFrame=CFrame.new(camera.CFrame.Position+wall.Offset) end end
+end)
 local map=workspace:WaitForChild('LunarCleanup'); local patches=map:WaitForChild('Patches')
+
 local gui=Instance.new('ScreenGui'); gui.Name='LunarCleanupHUD'; gui.ResetOnSpawn=false; gui.IgnoreGuiInset=false
  gui.Parent=player:WaitForChild('PlayerGui')
 local white=Color3.fromRGB(225,230,230); local muted=Color3.fromRGB(144,159,164)
@@ -701,7 +835,7 @@ Run:BindToRenderStep('LunarCleanupCamera',Enum.RenderPriority.Camera.Value+1,fun
  else UIS.MouseIconEnabled=false end
  cross.TextColor3=os.clock()<flashUntil and Color3.fromRGB(180,215,208) or white
  local params=RaycastParams.new(); params.FilterType=Enum.RaycastFilterType.Exclude
- params.FilterDescendantsInstances={char or view,view,puff}
+ params.FilterDescendantsInstances={char or view,view,puff,space}
  aimTrack.Visible=false
  local hit=workspace:Raycast(camera.CFrame.Position,camera.CFrame.LookVector*C.Range,params)
  if hit and hit.Instance:IsDescendantOf(patches) then
