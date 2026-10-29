@@ -11,7 +11,7 @@
 5. Wait for Output to say **LUNAR CLEANUP generated**. In Explorer, you should see `LunarCleanup` under Workspace, ReplicatedStorage, ServerScriptService, and StarterPlayer → StarterPlayerScripts.
 6. Save the place, then press **Play**. Start on the base platform, facing three dirty maintenance decks. Walk closer and look down at their surfaces.
 
-The generator replaces only its named generated objects and its marked lighting effects. It does change global Lighting settings and first-person StarterPlayer settings. It does not clear Terrain or delete your other objects. Running it again in Edit mode rebuilds the prototype and resets map dirt; it does not erase saved player accounts. Stop Play before regenerating. Avoid naming your own objects `LunarCleanup` in those services.
+The generator replaces only its named generated objects and its marked lighting effects. It does change global Lighting settings and first-person StarterPlayer settings. It rewrites only a bounded 320 × 80 × 320-stud Terrain region centered on the yard, and preserves a copy of that region before the first overhaul. It moves any Workspace Baseplate into `ServerStorage → LunarCleanupOriginalEnvironment` so it cannot fill the craters. Do not sculpt inside that region between reruns unless you have separately saved those edits. The generator also changes the global Sand terrain color. Other terrain outside that region is retained. Running it again in Edit mode rebuilds the prototype and resets map dirt; it does not erase saved player accounts. Stop Play before regenerating. Avoid naming your own objects `LunarCleanup` in those services.
 
 ## Play
 
@@ -30,7 +30,7 @@ The game saves money, carried dust, tool tier, and upgrades about every 55 secon
 
 ## Studio verification checklist
 
-This prototype has **not been playtested in Roblox Studio**. Its generator and all embedded scripts have been checked with the official Luau compiler. Roblox engine behavior still needs these checks:
+The previous version was successfully tested by the project owner in Roblox Studio, including localized cleaning. This **visual overhaul has not been playtested in Studio** by Codex. Its generator and all embedded scripts have been checked with the official Luau compiler. A structural mock run also generated the map twice with 941 static map parts, 588 unchanged cleaning patches, valid voxel-array dimensions, one preserved terrain snapshot, and no duplicate generated roots. This is not engine or performance testing. Roblox engine behavior still needs these checks:
 
 1. In Play, confirm the HUD loads, movement is first-person, and the brush is visible. Hold mouse on a dirty deck: only the area around your aim should fade, dust should increase, and full storage should stop rewards.
 2. Sell at the depot, then buy each upgrade near the terminal. Check money decreases by the displayed price and capacity/tool changes immediately. Remote purchase requests away from the terminal should not work.
@@ -43,8 +43,30 @@ This prototype has **not been playtested in Roblox Studio**. Its generator and a
 
 There are 588 anchored dirt patches across three decks. There are no per-patch scripts, physical dust pickups, vehicles, or automation. A bounded grid lookup and server raycasts validate each scrub request. Server-owned health/transparency replicate to all clients, including late joiners. Dust collection is immediate at the brush rather than a network-heavy cloud of collectible physical objects.
 
-The lunar landscape, crater rims, base, decks, and tool view models use Roblox primitives. Terrain is not voxel sculpted. Lighting requests the current Realistic style when supported and uses shadows and neutral grading. Black backdrop walls avoid external sky textures. Existing baseplate/terrain outside the generated map is retained. Restrained dust particles use Roblox's shipped smoke texture; brush audio uses a Roblox-shipped local footstep sound at low volume, so it requires no uploaded audio ID. Audio/particle appearance and performance should be checked on your target devices. Desktop mouse and keyboard are the supported controls for this prototype.
+The lunar landscape is a smooth voxel heightfield with six crater bowls, raised rims, noise-based ridges, and a flat work yard. The base, equipment, rocks, decks, and tool view models use Roblox primitives. Lighting requests the current Realistic style when supported and uses shadows and neutral grading. Black backdrop walls avoid external sky textures. Decorative geometry is static, and small industrial details do not intercept cleaning rays. There are two non-shadow-casting floodlights and a restrained bloom effect; no global atmospheric haze is added. Restrained dust particles use Roblox's shipped smoke texture; brush audio uses a Roblox-shipped local footstep sound at low volume, so it requires no uploaded audio ID. Audio/particle appearance and performance should be checked on your target devices. Desktop mouse and keyboard are the supported controls for this prototype.
 
 For tuning, edit the `Config` module source near the top of the generator, then regenerate in Edit mode. Do not edit player account versions casually: the DataStore name is `LunarCleanup_v1`. Generated Scripts are readable in Studio if you want to learn how they work.
 
-The file is saved in the Codex workspace. No GitHub push or Roblox publication was performed by Codex.
+## Visual overhaul and rollback
+
+The Studio-tested generator is preserved at `backups/LunarCleanupGenerator.studio-tested.lua`. Gameplay configuration and the entire server script are byte-for-byte unchanged in this overhaul. The same RemoteEvents, patch grid, surface heights, station interaction anchors, prices, rewards, progression, and DataStore name are retained. Client edits concern HUD presentation, tool geometry, visual animation, and particles.
+
+Before trying the new generator, save a separate `.rbxl` copy of your working Studio place. Run the new complete generator in Edit mode using the same steps above. On reruns it replaces the generated roots and rewrites the same Terrain region, rather than adding another map. The preserved original environment folder is reused, not replaced.
+
+To restore the pre-overhaul terrain, stop Play, then run this in the Command Bar **before** regenerating with the backup script:
+
+```lua
+local folder = game:GetService('ServerStorage'):FindFirstChild('LunarCleanupOriginalEnvironment')
+if folder then
+ local region = folder:FindFirstChild('TerrainBeforeOverhaul')
+ if region then workspace.Terrain:PasteRegion(region, Vector3int16.new(-40,-10,-40), true) end
+ local tint = folder:FindFirstChild('OriginalSandColor')
+ if tint then workspace.Terrain:SetMaterialColor(Enum.Material.Sand, tint.Value) end
+ local baseplate = folder:FindFirstChild('Baseplate')
+ if baseplate and not workspace:FindFirstChild('Baseplate') then baseplate.Parent = workspace end
+end
+```
+
+A saved `.rbxl` backup is the complete rollback option, including global Lighting settings. The original environment folder preserves Terrain in the generated bounds, the Baseplate, and template sky/atmosphere/post-processing instances under `LightingBeforeOverhaul`. Those original lighting instances are moved out of Lighting to prevent template haze or stacked effects. The folder does not preserve arbitrary user changes or all global Lighting properties.
+
+The updated files are saved in the Codex workspace. This visual overhaul has not been pushed to GitHub or published to Roblox.
