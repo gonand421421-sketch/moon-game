@@ -1,22 +1,27 @@
 -- Structural generation smoke test only. This is NOT a Roblox engine or playtest.
 local vecMT={}
-vecMT.__index=function(v,k) if k=='Magnitude' then return math.sqrt(v.X*v.X+v.Y*v.Y+v.Z*v.Z) end end
+vecMT.__index=function(v,k) if k=='Magnitude' then return math.sqrt(v.X*v.X+v.Y*v.Y+v.Z*v.Z) end
+ if k=='Unit' then return v/v.Magnitude end
+ if k=='Cross' then return function(a,b) return setmetatable({X=a.Y*b.Z-a.Z*b.Y,Y=a.Z*b.X-a.X*b.Z,Z=a.X*b.Y-a.Y*b.X},vecMT) end end
+end
 vecMT.__add=function(a,b) return setmetatable({X=a.X+b.X,Y=a.Y+b.Y,Z=a.Z+b.Z},vecMT) end
 vecMT.__sub=function(a,b) return setmetatable({X=a.X-b.X,Y=a.Y-b.Y,Z=a.Z-b.Z},vecMT) end
 vecMT.__mul=function(a,b) return setmetatable({X=a.X*b,Y=a.Y*b,Z=a.Z*b},vecMT) end
 vecMT.__div=function(a,b) return setmetatable({X=a.X/b,Y=a.Y/b,Z=a.Z/b},vecMT) end
 local Vector3={new=function(x,y,z) return setmetatable({X=x or 0,Y=y or 0,Z=z or 0},vecMT) end}
 local Vector3int16=Vector3
+local Vector2={new=function(x,y) return setmetatable({X=x,Y=y},{__index=function(v,k) if k=='Magnitude' then return math.sqrt(v.X*v.X+v.Y*v.Y) end end}) end}
 local cfMT={}; cfMT.__mul=function(a,b) return setmetatable({Position=a.Position+b.Position},cfMT) end
 local CFrame={new=function(x,y,z) return setmetatable({Position=type(x)=='table' and x or Vector3.new(x,y,z)},cfMT) end}
 CFrame.Angles=function() return CFrame.new() end
 CFrame.lookAt=function(a,b) return CFrame.new(a) end
+CFrame.fromMatrix=function(position,right,up,back) return setmetatable({Position=position,RightVector=right,UpVector=up,BackVector=back},cfMT) end
 local Color3={fromRGB=function(r,g,b) return {R=r,G=g,B=b} end,new=function(r,g,b) return {R=r,G=g,B=b} end}
 local UDim2={fromScale=function() return {} end,fromOffset=function() return {} end,new=function() return {} end}
 local Enum=setmetatable({},{__index=function(t,k) local e=setmetatable({},{__index=function(_,v) return k..'.'..v end}); rawset(t,k,e); return e end})
 local Region3={new=function(a,b) return {Min=a,Max=b} end}; local Region3int16=Region3
 local deferred={}; local spawned={}
-local task={defer=function(fn) table.insert(deferred,fn) end,spawn=function(fn) table.insert(spawned,fn) end,wait=function() end}
+local task={defer=function(fn) table.insert(deferred,fn) end,spawn=function(fn) table.insert(spawned,fn) end,wait=function() coroutine.yield() end}
 local function flush()
  local passes=0
  while #deferred>0 do
@@ -28,10 +33,11 @@ local function signal()
  local callbacks={}
  return {Connect=function(_,fn) table.insert(callbacks,fn) end,Fire=function(_,...) for _,fn in ipairs(callbacks) do fn(...) end end}
 end
+local messages={}
 local methods={}; local mt={}
 mt.__index=function(o,k)
  if methods[k] then return methods[k] end
- if k=='Changed' or k=='ChildAdded' or k=='ChildRemoved' then if not o.signals[k] then o.signals[k]=signal() end; return o.signals[k] end
+ if k=='Changed' or k=='ChildAdded' or k=='ChildRemoved' or k=='OnServerEvent' or k=='OnClientEvent' or k=='PlayerRemoving' then if not o.signals[k] then o.signals[k]=signal() end; return o.signals[k] end
  if k=='Position' and o.props.CFrame then return o.props.CFrame.Position end
  if o.props[k]~=nil then return o.props[k] end
  for _,c in ipairs(o.children) do if c.Name==k then return c end end
@@ -48,9 +54,12 @@ mt.__newindex=function(o,k,v)
  else o.props[k]=v end
  if o.signals.Changed then o.signals.Changed:Fire(k) end
 end
-local Instance={new=function(class) return setmetatable({props={Name=class,ClassName=class},children={},attrs={},signals={}},mt) end}
+local createdPartCount=0
+local Instance={new=function(class) if class=='Part' then createdPartCount+=1 end; return setmetatable({props={Name=class,ClassName=class},children={},attrs={},signals={}},mt) end}
+function methods:FireClient(player,kind,data) table.insert(messages,{Player=player,Kind=kind,Data=data}) end
 function methods:GetChildren() return table.clone(self.children) end
 function methods:FindFirstChild(name) for _,c in ipairs(self.children) do if c.Name==name then return c end end end
+function methods:WaitForChild(name) local child=self:FindFirstChild(name); assert(child,'missing reference '..name); return child end
 function methods:SetAttribute(k,v) self.attrs[k]=v end
 function methods:GetAttribute(k) return self.attrs[k] end
 function methods:IsA(c) return self.ClassName==c or (c=='BasePart' and (self.ClassName=='Part' or self.ClassName=='WedgePart' or self.ClassName=='SpawnLocation')) end
@@ -77,10 +86,10 @@ terrain.CopyRegion=function(self,r) copies+=1; return Instance.new('TerrainRegio
 terrain.GetMaterialColor=function() return Color3.new(1,1,1) end
 terrain.SetMaterialColor=function() end
 terrain.WriteVoxels=function(self,r,res,m,o)
- assert(res==4 and #m==80 and #o==80)
- for x=1,80 do assert(#m[x]==20 and #o[x]==20)
-  for y=1,20 do assert(#m[x][y]==80 and #o[x][y]==80)
-   for z=1,80 do assert(o[x][y][z]>=0 and o[x][y][z]<=1) end
+ assert(res==4 and #m==128 and #o==128)
+ for x=1,128 do assert(#m[x]==26 and #o[x]==26)
+  for y=1,26 do assert(#m[x][y]==128 and #o[x][y]==128)
+   for z=1,128 do assert(o[x][y][z]>=0 and o[x][y][z]<=1) end
   end
  end
  writes+=1
@@ -97,13 +106,15 @@ local Random={new=function(seed)
  local function nextValue() state=(state*48271)%2147483647; return state/2147483647 end
  return {NextNumber=function(_,a,b) return a+(b-a)*nextValue() end,NextInteger=function(_,a,b) return math.floor(a+(b-a+1)*nextValue()) end}
 end}
+local simClock=100; local fakeOS={clock=function() return simClock end,time=function() return 100000 end}
+local RaycastParams={new=function() return {} end}
 local require
 local cache={}
 require=function(module)
  if cache[module] then return cache[module] end
- local fn,err=loadstring('local game,workspace,script,require,Instance,Enum,Vector3,CFrame,Color3,task,warn = ...\n'..module.Source)
+ local fn,err=loadstring('local game,workspace,script,require,Instance,Enum,Vector3,CFrame,Color3,task,warn,os,RaycastParams,Vector2 = ...\n'..module.Source)
  assert(fn,err)
- local result=fn(game,workspace,module,require,Instance,Enum,Vector3,CFrame,Color3,task,print)
+ local result=fn(game,workspace,module,require,Instance,Enum,Vector3,CFrame,Color3,task,print,fakeOS,RaycastParams,Vector2)
  cache[module]=result; return result
 end
 local function generate()
@@ -112,25 +123,18 @@ end
 
 local function check()
  local map=Workspace:FindFirstChild('LunarCleanup'); assert(map)
- assert(#map.Patches:GetChildren()==588,'patch count')
- local ids,cells={},{}
- for _,p in ipairs(map.Patches:GetChildren()) do
-  local id=p:GetAttribute('PatchId'); assert(not ids[id]); ids[id]=true
-  assert(p.Position.Y==1.53 and p:GetAttribute('Health')==12)
-  local key=math.floor(p.Position.X/0.85)..':'..math.floor(p.Position.Z/0.85)
-  assert(not cells[key],'duplicate grid cell'); cells[key]=true
- end
+ assert(map.Patches==nil and #map.SurfaceRegions:GetChildren()==3,'plots must be replaced by region metadata')
  assert(map.Depot.Position.X==-12 and map.Terminal.Position.X==12)
  assert(map.Depot.Sell and map.Terminal.Upgrade)
  local count=0
  local function walk(o) for _,c in ipairs(o:GetChildren()) do if c:IsA('BasePart') then count+=1 end; walk(c) end end
  walk(map)
- print('Generated geometry parts:',count,'; patches:',#map.Patches:GetChildren())
+ print('Generated static geometry parts:',count,'; region definitions:',#map.SurfaceRegions:GetChildren())
  return count
 end
 generate(); local count=check()
 generate(); assert(check()==count,'rerun accumulated parts')
-assert(copies==1 and writes==2,'snapshot/rerun contract')
+assert(copies==2 and writes==2,'snapshot/rerun contract')
 assert(baseplate.Parent==services.ServerStorage.LunarCleanupOriginalEnvironment)
 for _,service in ipairs({'Workspace','ReplicatedStorage','ServerScriptService'}) do
  local n=0; for _,c in ipairs(services[service]:GetChildren()) do if c.Name=='LunarCleanup' then n+=1 end end

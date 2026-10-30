@@ -1,83 +1,87 @@
-# LUNAR CLEANUP — Studio setup
+# LUNAR CLEANUP — Regional surface expansion
 
-`LunarCleanupGenerator.lua` is the complete generator, including its embedded server script, client script, and configuration module. No plugins, downloads, or marketplace asset IDs are required. Use a new Baseplate place so unrelated maps or spawn points do not interfere.
+`LunarCleanupGenerator.lua` is the complete self-contained generator. It contains the server/client scripts and every generated module. No plugins, uploaded assets, or external downloads are required by the game.
 
-## Generate the game
+The owner tested the previous game's sky, cleaning speed, selling, upgrades and saving successfully. **This regional expansion has not been playtested in Roblox Studio by Codex.** The existing economy, cleaning coefficients, native black-sky module and reward calculations are unchanged.
 
-1. Open **Roblox Studio** and create a **Baseplate** place. Save a backup if using an existing place.
-2. Stop any running Play/Test session. The generator must run in **EDIT mode**.
-3. Open **Command Bar** from Studio's **View** toolbar/menu (the location may vary with Studio's layout). Also open **Explorer** and **Output**.
-4. Open `LunarCleanupGenerator.lua` in a text editor. Select **all its contents**, copy, paste into Studio's **Command Bar**, and press Enter. Paste the script contents, not the filename, and do not put it inside an ordinary Script.
-5. Wait for Output to say **LUNAR CLEANUP generated**. In Explorer, you should see `LunarCleanup` under Workspace, ReplicatedStorage, ServerScriptService, and StarterPlayer → StarterPlayerScripts.
-6. Save the place, then press **Play**. Start on the base platform, facing three dirty maintenance decks. Walk closer and look down at their surfaces.
+## Install in Roblox Studio
 
-The generator replaces only its named generated objects and its marked lighting effects. It does change global Lighting settings and first-person StarterPlayer settings. It rewrites only a bounded 320 × 80 × 320-stud Terrain region centered on the yard, and preserves a copy of that region before the first overhaul. It moves any Workspace Baseplate into `ServerStorage → LunarCleanupOriginalEnvironment` so it cannot fill the craters. Do not sculpt inside that region between reruns unless you have separately saved those edits. The generator also changes the global Sand terrain color. Other terrain outside that region is retained. Running it again in Edit mode rebuilds the prototype and resets map dirt; it does not erase saved player accounts. Stop Play before regenerating. Avoid naming your own objects `LunarCleanup` in those services.
+1. **Save a separate `.rbxl` backup of your working place.** The previous generator is also preserved in `backups/LunarCleanupGenerator.pre-regional-surface.lua`.
+2. Stop Play/Test. Open Studio's **Command Bar**, **Explorer** and **Output**.
+3. Open the updated `LunarCleanupGenerator.lua` from this repository. Use **Raw** on GitHub, select all, and copy the entire script.
+4. Paste the contents into the **Command Bar in EDIT mode** and press Enter. Do not paste just the filename or put the generator inside an ordinary Script.
+5. Wait for **LUNAR CLEANUP generated** in Output. Save the place and press **Play**.
+6. Walk off the base toward the ground ahead and aim downward. The old three framed plots are gone: dark removable regolith coating now follows the real Terrain.
 
-## Play
+Expected generated content:
 
-- **WASD**: move. **Mouse**: look. **Hold left mouse**: scrub within 14 studs.
-- Aim at the dust-coated deck tops. Nearby patches gradually become transparent as they are scrubbed, exposing the metal beneath. Fully cleaned patches remain aimable so you can sweep continuously across a deck.
-- Storage fills with the actual dust removed. When full, return to the **DUST DEPOT**, face its front, and hold **E** to sell. One dust unit earns two credits. Each removed health unit produces half a dust unit; fractional dust is retained between scrubs, sales, and saves.
-- At **EQUIPMENT**, hold **E** to open the terminal. Click an upgrade. Close with **TAB** or **CLOSE**.
-- Tools progress from **Toothbrush → Regolith Brush → Industrial Scrubber**. Speed, brush radius, and storage upgrades are separate. Purchases apply immediately.
-- A completely reclaimed deck gets a new dust coating after 12 seconds. Deck progress and dirt are shared by all players; each removed dust unit pays only once.
+- Workspace → `LunarCleanup`: base, depot, terminal, rocks, survey markers and `SurfaceRegions` metadata. There are no global per-cell dirt Parts.
+- ReplicatedStorage → `LunarCleanup`: the original `Scrub`, `Action`, `Feedback` RemoteEvents, a new `Surface` RemoteEvent, and Config/Environment/Economy/Regions/SurfaceRender modules.
+- ServerScriptService → `LunarCleanup`: the existing game server script with its regional targeting adaptation, plus its server-only `SurfaceWorld` child module.
+- StarterPlayer → StarterPlayerScripts → `LunarCleanup`: the first-person client.
+- During Play, each client creates `Workspace → LunarCleanupSurfaceVisuals` locally for its nearby coating pieces. These are not replicated physical dust objects.
 
-## Saving
+## Play and explore
 
-For persistent progress, first publish your place using Studio. In **Game Settings → Security**, enable **Studio Access to API Services** only for a separate test experience if you want to test DataStores in Studio. Studio tests can access that experience's actual stored data. Published servers use Roblox DataStores normally.
+- **WASD** moves; **mouse** looks; **hold left mouse** scrubs the ground within the unchanged 14-stud range.
+- The starting brush still has the same approximately **4.5-second center-cell time** on level ground without speed upgrades. Aim, overlap and slopes affect the visible footprint. No economy values were changed for this expansion.
+- Full storage stops removal. Return to the existing **DUST DEPOT** and hold **E** to sell. At **EQUIPMENT**, hold **E** and click an upgrade; close with **TAB** or **CLOSE**.
+- The base, selling anchor and upgrade interaction positions are unchanged. The habitat apron is excluded from the ground coating.
+- You can **walk through all three connected survey regions immediately**. Only cleaning permission is gated; there are no invisible walls or movement locks.
+- **Tranquility Approach** is the starter survey. **Basalt Expanse** opens for cleaning with the Regolith Brush **or 5% shared restoration of the Approach**. **Kepler Outer Rim** opens with the Industrial Scrubber **or 5% shared restoration of the Expanse**. These alternate gates avoid stranding a new player after others have cleaned the starter area.
+- The right-side survey HUD shows world slot, regional restoration percentages and cleaning locks. The center HUD names the region under your aim and its progress or requirement.
 
-The game saves money, carried dust, tool tier, and upgrades about every 55 seconds, on leaving, and during shutdown. A session lease guards against two servers writing the same profile. If loading fails or another session owns the profile, you can still try the game with temporary progress; the HUD displays a session-only warning and that session will never overwrite the existing account. Rejoin after API access or connectivity is fixed. Dirt on decks is server-local and intentionally resets in each new server. No implementation can guarantee saving during a crash or DataStore outage.
+The ground is procedural lunar terrain, not a NASA elevation dataset or a full-scale Moon. Survey edges use gentle noise variation, and the coating uses a continuous color field without plot frames or checkerboard coloring. Internally it remains a 0.85-stud patch system to preserve the working tool footprint and reward scale.
 
-## Studio verification checklist
+## Player saves and regional saves
 
-The project owner successfully tested cleaning, selling, upgrades, and saving in the previous visual version. This **native-sky and faster-brush update has not been playtested in Studio** by Codex. Its generator and all embedded scripts have been checked with the official Luau compiler. Structural mock runs generated the map twice with 935 static map parts, 588 cleaning patches, valid voxel-array dimensions, one preserved terrain snapshot, and no duplicate generated roots. Additional tests cover fractional reward conservation, full bags, sales, legacy save values, and runtime environment repair. The native sky uses a verified Roblox-shipped RGB-black texture. There are no background Parts, camera-following sky geometry, or periodic sky repair tasks. This is not engine or performance testing. Roblox engine behavior still needs these checks:
+Player accounts remain in **`LunarCleanup_v1`** with the same keys, fields, leases and save schedule. Money, carried dust/fractional carry, tools and upgrade levels are not reset or re-priced. Old players with higher-tier tools can immediately clean the corresponding outer regions.
 
-1. In Play, confirm the HUD loads, movement is first-person, and the brush is visible. Hold mouse on a dirty deck: only the area around your aim should fade, dust should increase, and full storage should stop rewards.
-2. Sell at the depot, then buy each upgrade near the terminal. Check money decreases by the displayed price and capacity/tool changes immediately. Remote purchase requests away from the terminal should not work.
-3. Use Studio's **Test** controls to start a server with **two players**. Scrub the same patch simultaneously: both clients should see the same fading and the total dust plus fractional carry collected by both players must not exceed 6 dust units per full 12-health patch (worth 12 credits). Sell inventories separately.
-4. Fully clean a deck; check progress reaches 100%, then the coating returns after 12 seconds. Check other decks retain their progress.
-5. In a published test experience with API access, earn and sell dust, leave, wait for the server to save/release, then rejoin. Check credits and upgrades return. With API access unavailable, check the session-only warning appears instead of a script crash.
-6. Watch **Output** for errors. Stop, run the generator again, and verify there is one generated root in each service and one HUD per player on the next Play run.
+Regional dirt is new, independent shared-world data in **`LunarCleanup_Surface_v1`**. Each live server exclusively leases one persistent survey slot, displayed as **SURVEY WORLD 1**, etc. All players in that server see the same ground state. Nearby clients receive shared deltas; joining clients receive current nearby chunks.
 
-## Design and limits
+The server loads regional state once, renews/saves its compact snapshot about every **55 seconds**, and attempts a final save/release at shutdown. Scrubbing and moving between chunks do **not** perform DataStore writes. Partial cell health round-trips at full numeric precision. Another live server gets a different slot rather than writing over the first server's surface.
 
-There are 588 anchored dirt patches across three decks. There are no per-patch scripts, physical dust pickups, vehicles, or automation. A bounded grid lookup and server raycasts validate each scrub request. Server-owned health/transparency replicate to all clients, including late joiners. Dust collection is immediate at the brush rather than a network-heavy cloud of collectible physical objects.
+**Important world behavior:** there are 16 survey slots in this prototype. A later server can reuse and restore a released slot. Joining a different active server can place you in a different survey world with different cleaned ground; there is no personal-world selection/matchmaking UI yet. Your account money and equipment follow you regardless. Check the world number before comparing saved map progress. Different servers are not pretending to modify a single globally synchronized Moon.
 
-The lunar landscape is a smooth voxel heightfield with six crater bowls, raised rims, noise-based ridges, and a flat work yard. The base, equipment, rocks, decks, and tool view models use Roblox primitives. Lighting requests the current Realistic style when supported and uses shadows and neutral grading. The native LunarSky has six explicit black texture faces, using the Roblox-shipped `rbxasset://textures/blackBkg_square.png` file. It does not depend on streaming, geometry, camera position, or render-step ordering. The server alone owns Sky creation/reparenting; client observers enforce the same face content on local-only skies and disable local haze/clouds without moving replicated objects. Repairs are event-driven, with no periodic polling or exact floating-point comparisons. Decorative geometry is static, and small industrial details do not intercept cleaning rays. There are two non-shadow-casting floodlights and a restrained bloom effect; no global atmospheric haze is added. Restrained dust particles use Roblox's shipped smoke texture; brush audio uses a Roblox-shipped local footstep sound at low volume, so it requires no uploaded audio ID. Audio/particle appearance and performance should be checked on your target devices. Desktop mouse and keyboard are the supported controls for this prototype.
+Regional dirt stays removed: the former tiny-deck recoat loop is not used for these persistent surveys. These regions contain finite work, with no automatic regional reset. New regions or a deliberately versioned future survey season can add work later. A finished world is finished; it does not silently reset people's map progress.
 
-For tuning, edit the `Config` module source near the top of the generator, then regenerate in Edit mode. Do not edit player account versions casually: the DataStore name is `LunarCleanup_v1`. Generated Scripts are readable in Studio if you want to learn how they work.
+## Studio API settings and failures
 
-## Visual overhaul and rollback
+For real save tests, publish a **separate test experience** and enable **Game Settings → Security → Studio Access to API Services** there. Studio can access that experience's real DataStores; do not erase your production data to test a new player.
 
-The Studio-tested generator is preserved at `backups/LunarCleanupGenerator.studio-tested.lua`. The pre-sky/balance visual generator is preserved at `backups/LunarCleanupGenerator.pre-sky-balance.lua`. The version immediately before the native-sky/faster-brush fix is preserved at `backups/LunarCleanupGenerator.pre-stable-sky.lua`. This update intentionally changes balance and fractional reward accounting, while retaining RemoteEvents, patch coordinates, interaction anchors, tools and upgrade level identities, session locking, and the `LunarCleanup_v1` DataStore. It adds shared Environment and Economy modules inside the same self-contained generator. Money and purchased levels are not reset. Existing carried dust is preserved, and new fractional dust carry is an additive save field.
+- If DataStore access fails in **Studio**, the surface system permits a clearly labeled **TEMPORARY STUDIO SURVEY**. Its ground resets between sessions. This does not claim the map was saved.
+- In a **published server**, if no persistent slot can be safely loaded/leased, surface cleaning pauses instead of granting rewards against an invented unsaved copy of the Moon. The survey HUD reports the pause; existing player account handling remains separate.
+- A world stops granting new surface rewards shortly before its unrenewed lease expires, or immediately if another owner is detected. Failed saves log errors. Recovery may require a new server after access is restored.
+- Map and player saves use separate keys. A crash can lose recent map changes within the autosave window; there is no atomic multi-key transaction guaranteeing both saves commit together. No implementation here promises crash-proof durability.
 
-Before trying the new generator, save a separate `.rbxl` copy of your working Studio place. Run the new complete generator in Edit mode using the same steps above. On reruns it replaces the generated roots and rewrites the same Terrain region, rather than adding another map. The preserved original environment folder is reused, not replaced.
+## Studio test checklist
 
-To restore the pre-overhaul terrain, stop Play, then run this in the Command Bar **before** regenerating with the backup script:
+1. **Generate twice in Edit mode.** Confirm only one generated root in each service, three SurfaceRegions entries, and no old MaintenanceDeck/Dust parts. Check the expanded terrain and backups remain sensible. Do not run the generator during Play.
+2. **Sky regression:** look up, turn, walk and scrub for several minutes. The working native black sky and bright lighting should be unchanged. There should be no camera-following black backdrop geometry.
+3. **Surface fit:** walk the Approach and crater edges. Coating should sit on the Terrain rather than a platform, fade gradually under the brush, expose the lighter Terrain, and keep its cleaned state when you walk away and return. Inspect for gaps, clipping, slope stretching or shimmering; those require real rendering checks.
+4. **Distance/performance:** inspect the **client** Workspace. Only nearby coating Parts should exist under LunarCleanupSurfaceVisuals, never more than 1,600 per client. Walk between regions, respawn and return. Watch frame rate and Output. Distant coating detail intentionally fades out; distant ground does not display a full-resolution cleaning map.
+5. **Regional gates:** a new Tool-1 profile can clean the Approach and explore everywhere. Try the Expanse before unlocking it; it should report the requirement and grant no dust. Buy the existing Regolith Brush or reach 5% shared Approach restoration and try again. Repeat for the Outer Rim. Do not alter real account data to simulate a fresh profile.
+6. **Two-player test:** start one server with two clients. Scrub the same ground, compare both views, and check the dirt/dust cannot be rewarded twice in that server. Each full 12-health cell still yields a total of 6 dust plus fractional carry, worth 12 credits. Sell and upgrade separately.
+7. **Economy regression:** fill a bag, verify cleaning stops, sell, buy existing upgrades and rejoin. Confirm previous money, dust and purchased levels remain. The existing depot/terminal must still reject remote actions from too far away.
+8. **Persistence:** with APIs enabled, record the survey world number and an identifiable cleaned spot. Allow an autosave, stop normally, and restart. If the same slot is reacquired, the spot and percentage should return. A second live server should lease a different slot. A temporary survey is not a persistence success.
+9. **Terrain streaming:** keep the place's actual streaming setting and test walking into both outer regions. Nearby coating waits for real streamed Terrain hits rather than making floating guesses when geometry is unavailable.
+
+## Reruns, terrain preservation and rollback
+
+The generator writes a bounded **512 × 104 × 512-stud** Terrain region: X/Z `-256..256`, Y `-48..56`. It does not call Terrain:Clear(). It preserves the pre-expansion contents once as `ServerStorage → LunarCleanupOriginalEnvironment → TerrainBeforeRegionalExpansion`. Earlier original-environment snapshots and the saved Baseplate are retained. It also retains the earlier Sand color/lighting-instance backups. Repeated generation reuses snapshots and replaces generated roots; it does not wipe either DataStore.
+
+Save separate backups of any custom sculpting inside those bounds before regenerating; reruns rebuild that footprint. Terrain outside the bounds remains untouched. The global Sand color and existing first-person/Lighting settings are applied as before.
+
+For a code-and-map rollback, prefer your saved `.rbxl`. To restore just the pre-expansion terrain before running `backups/LunarCleanupGenerator.pre-regional-surface.lua`, stop Play and run:
 
 ```lua
-local folder = game:GetService('ServerStorage'):FindFirstChild('LunarCleanupOriginalEnvironment')
-if folder then
- local region = folder:FindFirstChild('TerrainBeforeOverhaul')
- if region then workspace.Terrain:PasteRegion(region, Vector3int16.new(-40,-10,-40), true) end
- local tint = folder:FindFirstChild('OriginalSandColor')
- if tint then workspace.Terrain:SetMaterialColor(Enum.Material.Sand, tint.Value) end
- local baseplate = folder:FindFirstChild('Baseplate')
- if baseplate and not workspace:FindFirstChild('Baseplate') then baseplate.Parent = workspace end
+local saved = game:GetService('ServerStorage'):FindFirstChild('LunarCleanupOriginalEnvironment')
+local region = saved and saved:FindFirstChild('TerrainBeforeRegionalExpansion')
+if region then
+ workspace.Terrain:PasteRegion(region, Vector3int16.new(-64,-12,-64), true)
 end
 ```
 
-A saved `.rbxl` backup is the complete rollback option, including global Lighting settings. The original environment folder preserves Terrain in the generated bounds, the Baseplate, and template sky/atmosphere/post-processing instances under `LightingBeforeOverhaul`. Those original lighting instances are moved out of Lighting to prevent template haze or stacked effects. The folder does not preserve arbitrary user changes or all global Lighting properties.
+Then run the complete pre-regional generator in Edit mode. Regional saves remain in their separate DataStore for a future return to this version; do not delete them as part of a visual rollback.
 
-## Testing the native-sky and faster-brush update
-
-1. Save a `.rbxl` backup of your tested place. Stop Play and run the complete updated generator in Edit mode. Use the same published test experience to check existing save compatibility; do not clear its DataStores.
-2. Open **Output** before generating. `[LunarCleanup audit]` reports `StreamingEnabled`, existing Sky/Atmosphere/Clouds instances, and accessible place scripts containing environment references. A reference is a review hint, not proof that the script caused the bug. Other scripts are not automatically deleted or disabled.
-3. Press **Play**. Look straight up, rotate through every direction, walk around, and respawn. Space should remain black while the ground receives bright sunlight with strong shadows. Repeat with two clients and the place's existing streaming settings. Do not disable streaming as a substitute for this test.
-4. In the **client** Explorer view, check `Lighting → LunarSky`: all six `SkyboxBk/Dn/Ft/Lf/Rt/Up` properties must be `rbxasset://textures/blackBkg_square.png`. There should be no `Workspace → LunarCleanupLocalSpace` and no `SpaceBackdrop`/`BlackSpace` parts. There is no `LunarCleanupSky` render callback. Watch Output for `[LunarCleanup sky]` load errors; record any actual error text.
-5. To test conflicts without changing the saved place, switch the Command Bar to the **server during Play** and run `Instance.new("Sky").Parent = game:GetService("Lighting")`. It should be configured black, archived by the server, and logged. A newly added Clouds under Terrain should be disabled and archived. A **client-only** extra Sky gets black faces in place; clients do not create/reparent a competing primary sky. Stop Play to discard test additions.
-6. With a new player's unupgraded toothbrush, one center patch should clear in approximately **4.5 seconds of continuous contact**, with smooth intermediate fades. Patch-edge aiming, moving the brush, or existing speed upgrades change this time. Whole-unit dust counters can lag a fractional scrub; fractional rewards persist. Test looking up while idle, while walking, and immediately after scrubbing, then play for several minutes to check the reported cycling.
-7. Test full storage, sell, buy upgrades, then rejoin. Check your pre-existing money, tools, and purchased levels remain. Full storage must stop removal; repeated selling must not create more money. Compare two players on the same patch.
-8. For a fresh-player pacing trial, use a separate test account/experience rather than resetting your real progress. Existing balances and previously purchased equipment intentionally let returning players progress faster. Record actual unlock times and effective scrubbing/travel time for the next tuning pass.
-
-Baseline modeled progression is about 14.5 minutes to the Regolith Brush, 31 minutes to the Industrial Scrubber, and 47.5 minutes to all tools and support upgrades. These are estimates for a new profile, not guarantees. See `BALANCE_AND_SKY_NOTES.md` for the cause analysis, values, timing assumptions, and reproducible command-line checks. This update is delivered through the project's GitHub `main` branch; Codex reports the actual push result separately. No Roblox publication or Studio playtesting is performed by the command-line checks.
+See **REGIONAL_SURFACE_NOTES.md** for architecture, resource limits and tests. **BALANCE_AND_SKY_NOTES.md** documents the preceding sky/balance work; its balance coefficients and sky module are frozen in this expansion. Completed changes are delivered to GitHub `main`; the assistant reports the actual verified push result separately. Nothing here publishes the Roblox place for you.

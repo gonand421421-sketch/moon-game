@@ -1,5 +1,7 @@
 # Native sky correction and faster-brush balance
 
+Historical baseline: the regional expansion preserves the Config, Environment and Economy sources documented here unchanged. The former plot geometry, total static Part count and world-state implementation below describe the pre-expansion version; see **REGIONAL_SURFACE_NOTES.md** for the current terrain cleaning, regional permissions and shared-world persistence.
+
 ## Investigation: what failed in the previous implementation
 
 The previous update still did not define black sky content: all six Sky texture fields were empty. Instead it placed six 1,244-stud-wide background Parts 620 studs from the camera and moved them in a render callback. Six more Edit-mode walls sat 800 studs from the world origin. That was world geometry attempting to substitute for an actual skybox. Client ownership removed one streaming dependency, but could not make the geometry an infinite renderer sky background or remove its clipping/culling/render-update dependencies.

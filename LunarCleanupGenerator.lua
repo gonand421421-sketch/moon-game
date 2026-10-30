@@ -18,7 +18,7 @@ for _, child in ipairs(Lighting:GetChildren()) do
 end
 local map = Instance.new('Model'); map.Name = NAME; map.Parent = Workspace
 local net = Instance.new('Folder'); net.Name = NAME; net.Parent = ReplicatedStorage
-for _, name in ipairs({'Scrub','Action','Feedback'}) do
+for _, name in ipairs({'Scrub','Action','Feedback','Surface'}) do
  local remote = Instance.new('RemoteEvent'); remote.Name = name; remote.Parent = net
 end
 local config = Instance.new('ModuleScript'); config.Name = 'Config'; config.Parent = net
@@ -198,6 +198,368 @@ end
 return Economy
 ]==]
 
+local regions=Instance.new('ModuleScript'); regions.Name='Regions'
+regions.Parent=net
+regions.Source=[==[
+local C=require(script.Parent.Config)
+local R={}
+-- Regional presentation/state settings only. The existing economy Config is unchanged.
+R.ChunkCells=12; R.RenderRadius=18; R.EdgeFade=2; R.MaxVisuals=1600; R.BuildPerStep=90
+R.WorldSlots=16; R.LeaseSeconds=180; R.SaveSeconds=55; R.SharedAccessThreshold=0.05
+R.Definitions={
+ {Id=1,Name='TRANQUILITY APPROACH',X=0,Z=-12,RX=22,RZ=26,Tool=1},
+ {Id=2,Name='BASALT EXPANSE',X=34,Z=-66,RX=72,RZ=53,Tool=2},
+ {Id=3,Name='KEPLER OUTER RIM',X=-73,Z=-101,RX=73,RZ=75,Tool=3},
+}
+function R.Access(id,tool,previousProgress)
+ return tool>=R.Definitions[id].Tool or (id>1 and previousProgress>=R.SharedAccessThreshold)
+end
+function R.At(x,z)
+ -- Leave the habitat, depot, terminal and their shared walking apron uncovered.
+ if math.abs(x)<20 and z>10 and z<38 then return nil end
+ for _,region in ipairs(R.Definitions) do
+  local dx,dz=(x-region.X)/region.RX,(z-region.Z)/region.RZ
+  -- Low-frequency edge variation removes obvious circular/rectangular plot boundaries.
+  local edge=1+0.06*math.noise(x/14,z/14,73)
+  if dx*dx+dz*dz<=edge*edge then return region.Id end
+ end
+ return nil
+end
+function R.Cell(gx,gz)
+ return R.At((gx+0.5)*C.PatchSize,(gz+0.5)*C.PatchSize)
+end
+function R.Chunk(gx,gz)
+ local x,z=math.floor(gx/R.ChunkCells),math.floor(gz/R.ChunkCells)
+ return x..':'..z,(gz-z*R.ChunkCells)*R.ChunkCells+(gx-x*R.ChunkCells)+1,x,z
+end
+function R.Unpack(key,id)
+ local x,z=key:match('^(-?%d+):(-?%d+)$'); x,z=tonumber(x),tonumber(z)
+ if not x or not z or type(id)~='number' or id%1~=0 or id<1 or id>R.ChunkCells^2 then return nil end
+ return x*R.ChunkCells+(id-1)%R.ChunkCells,z*R.ChunkCells+math.floor((id-1)/R.ChunkCells)
+end
+function R.BuildIndex()
+ local chunks={}; local totals={0,0,0}
+ -- Bounded to this expedition map, not the whole Moon. No Part per cell.
+ for gx=-190,150 do for gz=-220,35 do
+  local region=R.Cell(gx,gz)
+  if region then
+   local key,id,x,z=R.Chunk(gx,gz)
+   local chunk=chunks[key]
+   if not chunk then chunk={X=x,Z=z,Cells={}}; chunks[key]=chunk end
+   chunk.Cells[id]=region; totals[region]+=1
+  end
+ end end
+ return chunks,totals
+end
+function R.Encode(health,cells)
+ local list={}; local allClean=true
+ for id in pairs(cells) do
+  local value=health[id] or C.PatchHealth
+  if value>0 then allClean=false end
+  if value<C.PatchHealth then table.insert(list,id..'='..string.format('%.17g',value)) end
+ end
+ if allClean then return '*' end
+ table.sort(list)
+ return table.concat(list,';')
+end
+function R.Decode(text,cells)
+ local health={}
+ if text=='*' then for id in pairs(cells) do health[id]=0 end; return health end
+ if type(text)~='string' or #text>6000 then return health end
+ for id,value in text:gmatch('(%d+)=([^;]+)') do
+  id,value=tonumber(id),tonumber(value)
+  if cells[id] and value and value==value and value>=0 and value<C.PatchHealth then health[id]=value end
+ end
+ return health
+end
+function R.ChunkCellsAt(key)
+ local cells={}
+ for id=1,R.ChunkCells^2 do
+  local gx,gz=R.Unpack(key,id)
+  if not gx then return cells end
+  local region=R.Cell(gx,gz); if region then cells[id]=region end
+ end
+ return cells
+end
+return R
+]==]
+
+local surfaceRender=Instance.new('ModuleScript'); surfaceRender.Name='SurfaceRender'
+surfaceRender.Parent=net
+surfaceRender.Source=[==[
+local Players=game:GetService('Players')
+local net=game:GetService('ReplicatedStorage'):WaitForChild('LunarCleanup')
+local C=require(net.Config); local R=require(net.Regions)
+local Render={Status=nil}
+local chunks,metadata,visuals,pool={},{},{},{}
+local retryAt={}
+local folder=Instance.new('Folder'); folder.Name='LunarCleanupSurfaceVisuals'; folder.Parent=workspace
+local terrainParams=RaycastParams.new(); terrainParams.FilterType=Enum.RaycastFilterType.Include; terrainParams.FilterDescendantsInstances={workspace.Terrain}
+local function recycle(key)
+ local record=visuals[key]
+ if record then record.Part.Parent=nil; table.insert(pool,record.Part); visuals[key]=nil end
+end
+local function acquire()
+ local p=table.remove(pool)
+ if not p then
+  p=Instance.new('Part'); p.Name='RegolithCoating'; p.Anchored=true; p.CanCollide=false
+  p.CanTouch=false; p.CanQuery=false; p.CastShadow=false; p.Material=Enum.Material.Sand
+ end
+ return p
+end
+net.Surface.OnClientEvent:Connect(function(kind,data)
+ if kind=='Snapshot' then
+  Render.Status=data.Status
+  local keep={}; for _,key in ipairs(data.Keep) do keep[key]=true end
+  for key in pairs(chunks) do if not keep[key] then chunks[key]=nil; metadata[key]=nil end end
+  for key,encoded in pairs(data.Chunks) do
+   metadata[key]=metadata[key] or R.ChunkCellsAt(key)
+   chunks[key]=R.Decode(encoded,metadata[key])
+  end
+ elseif kind=='Delta' then
+  for _,cell in ipairs(data) do if chunks[cell.Key] then chunks[cell.Key][cell.Id]=cell.Health end end
+ end
+end)
+local function accessible(id,tool)
+ local status=Render.Status
+ local previous=id>1 and status and status.Regions[id-1].Progress or 0
+ return R.Access(id,tool,previous)
+end
+function Render.Describe(position,tool)
+ local id=R.At(position.X,position.Z)
+ if not id then return 'UNSURVEYED REGOLITH',0 end
+ local definition=R.Definitions[id]
+ if not accessible(id,tool) then return definition.Name..'  /  '..C.Tools[definition.Tool].Name..' OR 5% OF PREVIOUS REGION',0 end
+ local status=Render.Status
+ if not status or not status.Ready then return definition.Name..'  /  LOADING SURVEY',0 end
+ if not status.Writable then return 'SURFACE SAVING UNAVAILABLE — CLEANING PAUSED',0 end
+ local progress=status.Regions[id].Progress
+ return string.format('%s  /  %.1f%% RESTORED',definition.Name,progress*100),progress
+end
+function Render.Summary()
+ local status=Render.Status
+ if not status then return 'CONNECTING TO LUNAR SURVEY...' end
+ local title=status.Persistent and ('SURVEY WORLD '..status.Slot) or 'TEMPORARY STUDIO SURVEY'
+ if not status.Ready then title='LOADING SURVEY WORLD...' elseif not status.Writable then title='SURVEY OFFLINE — CLEANING PAUSED' end
+ local lines={title}
+ for _,definition in ipairs(R.Definitions) do
+  local pct=status.Regions[definition.Id].Progress*100
+  local locked=not accessible(definition.Id,Players.LocalPlayer:GetAttribute('Tool') or 1)
+  table.insert(lines,string.format('%s  %.1f%% %s',definition.Name,pct,locked and '[TOOL LOCK]' or ''))
+ end
+ return table.concat(lines,'\n')
+end
+function Render.Start()
+ local player=Players.LocalPlayer
+ task.spawn(function()
+  while folder.Parent do net.Surface:FireServer('Subscribe'); task.wait(0.8) end
+ end)
+ task.spawn(function()
+  while folder.Parent do
+   task.wait(0.1)
+   local root=player.Character and player.Character:FindFirstChild('HumanoidRootPart')
+   if root then
+    local center=root.Position; local radius=R.RenderRadius; local reach=math.ceil(radius/C.PatchSize)
+    local gx,gz=math.floor(center.X/C.PatchSize),math.floor(center.Z/C.PatchSize)
+    local candidates={}; local desired={}
+    for dx=-reach,reach do for dz=-reach,reach do
+     local x,z=gx+dx,gz+dz
+     local px,pz=(x+0.5)*C.PatchSize,(z+0.5)*C.PatchSize
+     local dist2=(px-center.X)^2+(pz-center.Z)^2
+     if dist2<radius^2 then
+      local key,id=R.Chunk(x,z)
+      local health=metadata[key] and metadata[key][id] and chunks[key] and (chunks[key][id] or C.PatchHealth)
+      if health and health>0 then
+       local cellKey=x..':'..z
+       table.insert(candidates,{Key=cellKey,X=px,Z=pz,Distance=math.sqrt(dist2),Health=health})
+      end
+     end
+    end end
+    table.sort(candidates,function(a,b) return a.Distance<b.Distance end)
+    for i=1,math.min(#candidates,R.MaxVisuals) do desired[candidates[i].Key]=true end
+    for key in pairs(visuals) do if not desired[key] then recycle(key) end end
+    for key in pairs(retryAt) do if not desired[key] then retryAt[key]=nil end end
+    local built=0; local now=os.clock()
+    for i=1,math.min(#candidates,R.MaxVisuals) do
+     local item=candidates[i]; local record=visuals[item.Key]
+     if not record and built<R.BuildPerStep and now>=(retryAt[item.Key] or 0) then
+      built+=1
+      -- Query the actual streamed voxel surface, not the analytic height approximation.
+      local hit=workspace:Raycast(Vector3.new(item.X,80,item.Z),Vector3.new(0,-160,0),terrainParams)
+      if hit and hit.Normal.Y>=0.35 then
+       local normal=hit.Normal
+       local right=(Vector3.new(1,0,0)-normal*normal.X).Unit
+       local back=right:Cross(normal).Unit
+       local p=acquire()
+       local sx=C.PatchSize*1.035/math.max(0.45,Vector2.new(right.X,right.Z).Magnitude)
+       local sz=C.PatchSize*1.035/math.max(0.45,Vector2.new(back.X,back.Z).Magnitude)
+       p.Size=Vector3.new(sx,0.012,sz)
+       p.CFrame=CFrame.fromMatrix(hit.Position+normal*0.025,right,normal,back)
+       local shade=math.floor(73+math.noise(item.X/7,item.Z/7,4)*12)
+       p.Color=Color3.fromRGB(shade,shade-1,shade-2); p.Transparency=1; p.Parent=folder
+       record={Part=p,Born=now}; visuals[item.Key]=record; retryAt[item.Key]=nil
+      else
+       -- Missing streamed Terrain or a cliff must not starve all farther candidates.
+       retryAt[item.Key]=now+(hit and 3 or 0.5)
+      end
+     end
+     if record then
+      local fade=math.clamp((radius-item.Distance)/R.EdgeFade,0,1)
+      fade=fade*fade*(3-2*fade)
+      record.Part.Transparency=1-(item.Health/C.PatchHealth)*fade*math.clamp((now-record.Born)/0.2,0,1)
+     end
+    end
+   else for key in pairs(visuals) do recycle(key) end end
+  end
+ end)
+end
+return Render
+]==]
+
+local surfaceWorld=Instance.new('ModuleScript'); surfaceWorld.Name='SurfaceWorld'
+surfaceWorld.Source=[==[
+local Players=game:GetService('Players')
+local DSS=game:GetService('DataStoreService')
+local Run=game:GetService('RunService')
+local net=game:GetService('ReplicatedStorage'):WaitForChild('LunarCleanup')
+local C=require(net.Config); local R=require(net.Regions)
+local World={Ready=false,Persistent=false,Slot=0,Active=true,Saving=false,Lost=false,Lease=0}
+local index,totals=R.BuildIndex()
+local storeOK,store=pcall(function() return DSS:GetDataStore('LunarCleanup_Surface_v1') end)
+if not storeOK then warn('Lunar surface store initialization unavailable: '..tostring(store)); store=nil end
+local encoded,live,dirty,changes={},{},{},{}
+local removed={0,0,0}; local subscriptions={}; local requestTimes={}
+local token
+local function chunk(key)
+ if not index[key] then return nil end
+ if not live[key] then live[key]=R.Decode(encoded[key],index[key].Cells) end
+ return live[key]
+end
+function World.Stats()
+ local stats={}
+ for i,definition in ipairs(R.Definitions) do
+  stats[i]={Name=definition.Name,Tool=definition.Tool,Progress=math.clamp(removed[i]/math.max(1,totals[i]*C.PatchHealth),0,1),Cells=totals[i]}
+ end
+ return {Regions=stats,Slot=World.Slot,Persistent=World.Persistent,Ready=World.Ready,Writable=World.CanScrub()}
+end
+function World.CanScrub()
+ return World.Ready and not World.Lost and (not World.Persistent or os.time()<World.Lease-15)
+end
+function World.Access(id,tool)
+ local previous=id>1 and removed[id-1]/math.max(1,totals[id-1]*C.PatchHealth) or 0
+ return R.Access(id,tool,previous)
+end
+function World.Get(gx,gz)
+ local key,id=R.Chunk(gx,gz); local meta=index[key]
+ if not meta or not meta.Cells[id] then return nil end
+ local health=chunk(key)
+ return health[id] or C.PatchHealth,meta.Cells[id],key,id
+end
+function World.Set(key,id,value)
+ local meta=index[key]; if not meta or not meta.Cells[id] then return end
+ local health=chunk(key); local previous=health[id] or C.PatchHealth
+ value=math.clamp(value,0,previous) -- monotonic; only a new world/region can add new dirt.
+ if value==previous then return end
+ health[id]=value; removed[meta.Cells[id]]+=previous-value; dirty[key]=true
+ changes[key]=changes[key] or {}; changes[key][id]=value
+end
+local function copyEncoded()
+ for key in pairs(dirty) do encoded[key]=R.Encode(chunk(key),index[key].Cells); dirty[key]=nil end
+ local result={}; for key,value in pairs(encoded) do result[key]=value end
+ return result
+end
+function World.Save(release)
+ if not World.Persistent or World.Lost or World.Saving then return false end
+ World.Saving=true
+ local snapshot=copyEncoded()
+ local size=0; for key,value in pairs(snapshot) do size+=#key+#value end
+ if size>2500000 then World.Saving=false; warn('Lunar surface snapshot limit reached; refusing an oversized save'); return false end
+ local ok,result=pcall(function()
+  return store:UpdateAsync('World_'..World.Slot,function(old)
+   if type(old)~='table' or old.Session~=token then return nil end
+   return {Version=1,Chunks=snapshot,Session=release and '' or token,Lease=release and 0 or os.time()+R.LeaseSeconds}
+  end)
+ end)
+ World.Saving=false
+ if ok and result then World.Lease=result.Lease; return true end
+ if ok then World.Lost=true; warn('Lunar surface world lease lost; further surface rewards are paused.')
+ else warn('Lunar surface save failed; retrying on the next scheduled save: '..tostring(result)) end
+ return false
+end
+function World.Start(session)
+ token=session
+ for slot=1,(store and R.WorldSlots or 0) do
+  local ok,result=pcall(function()
+   return store:UpdateAsync('World_'..slot,function(old)
+    old=type(old)=='table' and old or {}
+    if old.Version and old.Version~=1 then return nil end
+    if old.Session and old.Session~='' and (tonumber(old.Lease) or 0)>os.time() then return nil end
+    return {Version=1,Chunks=type(old.Chunks)=='table' and old.Chunks or {},Session=token,Lease=os.time()+R.LeaseSeconds}
+   end)
+  end)
+  if not ok then warn('Lunar surface load unavailable: '..tostring(result)); break end
+  if result and result.Session==token then
+   World.Slot=slot; World.Lease=result.Lease; World.Persistent=true
+   for key,value in pairs(result.Chunks) do
+    if index[key] and type(value)=='string' then
+     encoded[key]=value
+     local values=R.Decode(value,index[key].Cells)
+     for id,h in pairs(values) do removed[index[key].Cells[id]]+=C.PatchHealth-h end
+    end
+   end
+   break
+  end
+ end
+ -- Studio API access is often disabled. Never silently invent a new persistent world.
+ if not World.Persistent and not Run:IsStudio() then
+  World.Lost=true; warn('No persistent lunar world available. Surface rewards paused; player profiles are unaffected.')
+ end
+ World.Ready=true
+ task.spawn(function()
+  while World.Active do task.wait(R.SaveSeconds); if World.Active then World.Save(false) end end
+ end)
+end
+local function send(player,kind,data)
+ if player.Parent then net.Surface:FireClient(player,kind,data) end
+end
+net.Surface.OnServerEvent:Connect(function(player,action)
+ if action~='Subscribe' or not player:GetAttribute('DataReady') then return end
+ local now=os.clock(); if now-(requestTimes[player] or 0)<0.6 then return end; requestTimes[player]=now
+ local root=player.Character and player.Character:FindFirstChild('HumanoidRootPart')
+ if not root then return end
+ -- Derive subscriptions from the server character, never client-supplied coordinates.
+ local width=R.ChunkCells*C.PatchSize
+ local cx,cz=math.floor(root.Position.X/width),math.floor(root.Position.Z/width)
+ local reach=math.ceil(R.RenderRadius/width)+1
+ local previous=subscriptions[player] or {}; local keep,new,snapshots={},{},{}
+ for x=cx-reach,cx+reach do for z=cz-reach,cz+reach do
+  local key=x..':'..z
+  if index[key] then
+   new[key]=true; table.insert(keep,key)
+   if not previous[key] and World.Ready then snapshots[key]=R.Encode(chunk(key),index[key].Cells) end
+  end
+ end end
+ -- No cached 'loaded' subscriptions before world loading, so the next request sends snapshots.
+ subscriptions[player]=World.Ready and new or {}
+ send(player,'Snapshot',{Keep=keep,Chunks=snapshots,Status=World.Stats()})
+end)
+Players.PlayerRemoving:Connect(function(player) subscriptions[player]=nil; requestTimes[player]=nil end)
+task.spawn(function()
+ while World.Active do
+  task.wait(0.2)
+  local batch=changes; changes={}
+  for player,subscribed in pairs(subscriptions) do
+   local delta={}
+   for key,values in pairs(batch) do if subscribed[key] then
+    for id,value in pairs(values) do table.insert(delta,{Key=key,Id=id,Health=value}) end
+   end end
+   if #delta>0 then send(player,'Delta',delta) end
+  end
+ end
+end)
+return World
+]==]
+
 local function part(name, size, cf, color, material, parent)
  local p = Instance.new('Part'); p.Name=name; p.Size=size; p.CFrame=cf; p.Color=color
  p.Material=material or Enum.Material.Metal; p.Anchored=true; p.TopSurface=Enum.SurfaceType.Smooth
@@ -216,7 +578,7 @@ end
 -- in ServerStorage so generation is repeatable without Terrain:Clear().
 local ServerStorage=game:GetService('ServerStorage')
 local terrain=Workspace.Terrain
-local region=Region3.new(Vector3.new(-160,-40,-160),Vector3.new(160,40,160))
+local region=Region3.new(Vector3.new(-256,-48,-256),Vector3.new(256,56,256))
 local preservation=ServerStorage:FindFirstChild('LunarCleanupOriginalEnvironment')
 if not preservation then
  preservation=Instance.new('Folder'); preservation.Name='LunarCleanupOriginalEnvironment'
@@ -224,6 +586,12 @@ if not preservation then
  original.Name='TerrainBeforeOverhaul'; original.Parent=preservation
  local tint=Instance.new('Color3Value'); tint.Name='OriginalSandColor'; tint.Value=terrain:GetMaterialColor(Enum.Material.Sand); tint.Parent=preservation
  preservation.Parent=ServerStorage
+end
+-- Expanded footprint is preserved separately from the earlier 320-stud snapshot.
+-- Never replace an existing snapshot when regenerating.
+if not preservation:FindFirstChild('TerrainBeforeRegionalExpansion') then
+ local snapshot=terrain:CopyRegion(Region3int16.new(Vector3int16.new(-64,-12,-64),Vector3int16.new(63,13,63)))
+ snapshot.Name='TerrainBeforeRegionalExpansion'; snapshot.Parent=preservation
 end
 -- Read-only inventory identifies conflicts in the user's actual Studio place.
 print('[LunarCleanup audit] StreamingEnabled = '..tostring(Workspace.StreamingEnabled))
@@ -276,14 +644,14 @@ local function groundHeight(x,z)
  return -0.6+(h+0.6)*blend
 end
 local materials,occupancy={},{}
-for ix=1,80 do
+for ix=1,128 do
  materials[ix]={}; occupancy[ix]={}
- for iy=1,20 do materials[ix][iy]={}; occupancy[ix][iy]={} end
- for iz=1,80 do
-  local x,z=-160+(ix-0.5)*4,-160+(iz-0.5)*4
+ for iy=1,26 do materials[ix][iy]={}; occupancy[ix][iy]={} end
+ for iz=1,128 do
+  local x,z=-256+(ix-0.5)*4,-256+(iz-0.5)*4
   local h=groundHeight(x,z)
-  for iy=1,20 do
-   local bottom=-40+(iy-1)*4
+  for iy=1,26 do
+   local bottom=-48+(iy-1)*4
    local amount=math.clamp((h-bottom)/4,0,1)
    occupancy[ix][iy][iz]=amount
    materials[ix][iy][iz]=amount==0 and Enum.Material.Air or (bottom>h-8 and Enum.Material.Sand or Enum.Material.Rock)
@@ -304,8 +672,8 @@ local function rod(name,a,b,r,color,material)
 end
 local pale=Color3.fromRGB(158,162,160)
 local safety=Color3.fromRGB(161,143,98)
-for i=1,100 do
- local x,z=rng:NextNumber(-150,150),rng:NextNumber(-150,150)
+for i=1,200 do
+ local x,z=rng:NextNumber(-245,245),rng:NextNumber(-245,245)
  if math.abs(x)>37 or math.abs(z-7)>38 then
   local h=groundHeight(x,z); local scale=rng:NextNumber(0.6,4.5)
   local rock=detail('FracturedBasalt',Vector3.new(scale*1.9,scale,scale*1.3),
@@ -404,40 +772,20 @@ end
 local spawn=Instance.new('SpawnLocation'); spawn.Name='Arrival'; spawn.Size=Vector3.new(5,0.2,5)
 spawn.CFrame=CFrame.new(0,1.2,15); spawn.Transparency=1; spawn.Anchored=true; spawn.Neutral=true
 spawn.Duration=0; spawn.Parent=map
--- Three maintenance decks: 588 small patches, all static, no physics or per-patch scripts.
-local patches=Instance.new('Folder'); patches.Name='Patches'; patches.Parent=map
-for deck=1,3 do
- local x=(deck-2)*15
- part('DeckSupport',Vector3.new(13,1.2,13),CFrame.new(x,0.6,-4),dark)
- local surface=part('MaintenanceDeck',Vector3.new(12.5,0.3,12.5),CFrame.new(x,1.35,-4),Color3.fromRGB(137,147,151),Enum.Material.Metal)
- for line=0,3 do
-  part('DeckSeam',Vector3.new(0.035,0.012,12.4),CFrame.new(x-6.15+line*4.1,1.507,-4),dark)
- end
- for row=1,C.Rows do for col=1,C.Columns do
-  local id=(deck-1)*C.Rows*C.Columns+(row-1)*C.Columns+col
-  local px=x+(col-(C.Columns+1)/2)*C.PatchSize
-  local pz=-4+(row-(C.Rows+1)/2)*C.PatchSize
-  -- Continuous low-frequency tint avoids a random checkerboard while keeping every patch.
-  local shade=math.floor(92+math.noise(px/5,pz/5,4)*11+math.noise(px/1.8,pz/1.8,9)*3)
-  local p=part('Dust_'..id,Vector3.new(C.PatchSize,0.035,C.PatchSize),CFrame.new(px,1.53,pz),Color3.fromRGB(shade,shade-2,shade-4),Enum.Material.Sand,patches)
-  p.CanCollide=false; p.CanTouch=false; p.CastShadow=false; p:SetAttribute('PatchId',id)
-  p:SetAttribute('Health',C.PatchHealth); p:SetAttribute('Deck',deck)
- end end
- -- Peripheral rail, fasteners, landing plates and service conduit: outside the grid.
- for _,side in ipairs({-1,1}) do
-  detail('DeckEdgeBeam',Vector3.new(0.24,0.18,12.8),CFrame.new(x+side*6.25,1.45,-4),pale)
-  for j=0,6 do
-   local bolt=detail('FlushFastener',Vector3.new(0.11,0.045,0.11),CFrame.new(x+side*6.08,1.52,-9.8+j*1.9),dark)
-   bolt.Shape=Enum.PartType.Ball
-  end
-  detail('ServiceFoot',Vector3.new(1,0.8,1.5),CFrame.new(x+side*5.1,0.05,-4),pale)
- end
- for j=1,4 do
-  detail('WornEdgeMarking',Vector3.new(0.65,0.018,0.18),CFrame.new(x-4.5+j*1.7,1.515,2.08),safety)
- end
- detail('DeckAccessStep',Vector3.new(4,0.35,0.75),CFrame.new(x,0.75,2.8),dark,Enum.Material.DiamondPlate)
- rod('ServiceConduit',Vector3.new(x-5,0.6,-10.5),Vector3.new(x+5,0.6,-10.5),0.12,pale)
- local sign=part('DeckMarker' ,Vector3.new(5,1,0.2),CFrame.new(x,2.3,-11),dark); label(sign,'RECLAMATION DECK 0'..deck)
+-- Survey definitions replace the three framed maintenance decks. All cleaning
+-- visuals are local terrain-aligned coating; no server-side Part per surface cell.
+local regionFolder=Instance.new('Folder'); regionFolder.Name='SurfaceRegions'; regionFolder.Parent=map
+local R=require(regions)
+for _,definition in ipairs(R.Definitions) do
+ local entry=Instance.new('Folder'); entry.Name='Region_'..definition.Id
+ entry:SetAttribute('Title',definition.Name); entry:SetAttribute('RequiredTool',definition.Tool); entry.Parent=regionFolder
+end
+local sign=detail('SurveyBoard',Vector3.new(9,3,0.25),CFrame.new(-7,3.2,12),dark)
+label(sign,'SURFACE RECLAMATION\nAPPROACH → PLAINS → OUTER RIM\nExplore freely / tools or shared restoration open regions')
+for _,point in ipairs({Vector3.new(-23,0,-14),Vector3.new(2,0,-37),Vector3.new(5,0,-62),Vector3.new(-27,0,-82),Vector3.new(-58,0,-107)}) do
+ local h=groundHeight(point.X,point.Z)
+ rod('SurveyStake',Vector3.new(point.X,h,point.Z),Vector3.new(point.X,h+2,point.Z),0.06,pale)
+ detail('SurveyMarker',Vector3.new(0.55,0.2,0.1),CFrame.new(point.X,h+1.8,point.Z),safety)
 end
 -- Current unified lighting; guard for Studio versions without this property.
 local lightingOK = pcall(function()
@@ -461,20 +809,17 @@ local RS=game:GetService('ReplicatedStorage')
 local DSS=game:GetService('DataStoreService')
 local Http=game:GetService('HttpService')
 local net=RS:WaitForChild('LunarCleanup'); local C=require(net.Config)
-local map=workspace:WaitForChild('LunarCleanup'); local folder=map:WaitForChild('Patches')
+local map=workspace:WaitForChild('LunarCleanup')
+local R=require(net.Regions); local World=require(script:WaitForChild('SurfaceWorld'))
 local Economy=require(net.Economy)
 local original=game:GetService('ServerStorage'):WaitForChild('LunarCleanupOriginalEnvironment')
 require(net.Environment).Start(original:WaitForChild('LightingBeforeOverhaul'))
 local store=DSS:GetDataStore('LunarCleanup_v1')
 local session=game.JobId..':'..Http:GenerateGUID(false)
-local profiles={}; local patches={}; local cells={}; local deckState={}
+task.spawn(World.Start,session)
+local profiles={}
+local surfaceGeometry={} -- Static generated Terrain: lazy cache only cells actually brushed.
 local closing=false
-for _, p in ipairs(folder:GetChildren()) do
- local id=p:GetAttribute('PatchId'); patches[id]=p
- local key=math.floor(p.Position.X/C.PatchSize)..':'..math.floor(p.Position.Z/C.PatchSize)
- cells[key]=p
- local d=p:GetAttribute('Deck'); deckState[d]=deckState[d] or {remaining=C.Rows*C.Columns,resetAt=0}
-end
 local function cleanInteger(v, maximum)
  if type(v)~='number' or v~=v or math.abs(v)==math.huge then return 0 end
  return math.clamp(math.floor(v),0,maximum)
@@ -598,54 +943,44 @@ net.Scrub.OnServerEvent:Connect(function(p,origin,direction)
  if s.data.Dust>=C.Capacity(s.data.Storage) then return end
  local params=RaycastParams.new(); params.FilterType=Enum.RaycastFilterType.Exclude; params.FilterDescendantsInstances={char}
  local hit=workspace:Raycast(origin,direction*C.Range,params)
- if not hit or not hit.Instance:IsDescendantOf(folder) then return end
+ if not hit or hit.Instance~=workspace.Terrain or hit.Normal.Y<0.35 or not World.CanScrub() then return end
  if (head.Position-hit.Position).Magnitude>C.Range then return end
  local sight=workspace:Raycast(head.Position,hit.Position-head.Position,params)
- if sight and sight.Instance~=hit.Instance and (sight.Position-hit.Position).Magnitude>0.12 then return end
+ -- Terrain is one Instance: compare hit positions, not only Instance identity.
+ if sight and (sight.Position-hit.Position).Magnitude>0.12 then return end
  local tool=C.Tools[s.data.Tool]; local radius=tool.Radius*(1+C.RadiusPerLevel*s.data.Radius)
  local power=tool.Power*(1+C.SpeedPerLevel*s.data.Speed)
- local center=hit.Position; local deck=hit.Instance:GetAttribute('Deck'); local total=0; local touched=0
+ local center=hit.Position; local regionId=R.At(center.X,center.Z)
+ if not regionId or not World.Access(regionId,s.data.Tool) then return end
+ local total=0
  local cx,cz=math.floor(center.X/C.PatchSize),math.floor(center.Z/C.PatchSize)
  local steps=math.ceil((radius+C.PatchSize)/C.PatchSize)
+ local terrainParams=RaycastParams.new(); terrainParams.FilterType=Enum.RaycastFilterType.Include
+ terrainParams.FilterDescendantsInstances={workspace.Terrain}
  for dx=-steps,steps do for dz=-steps,steps do
-  local patch=cells[(cx+dx)..':'..(cz+dz)]
-  if patch and patch:GetAttribute('Deck')==deck then
-   local distance=(Vector2.new(patch.Position.X,patch.Position.Z)-Vector2.new(center.X,center.Z)).Magnitude
+  local gx,gz=cx+dx,cz+dz
+  local health,id,key,cell=World.Get(gx,gz)
+  if health and health>0 and World.Access(id,s.data.Tool) then
+   local x,z=(gx+0.5)*C.PatchSize,(gz+0.5)*C.PatchSize
+   local distance=Vector2.new(x-center.X,z-center.Z).Magnitude
    if distance<=radius+C.PatchSize*0.38 then
-    local health=patch:GetAttribute('Health')
-    local room=C.Capacity(s.data.Storage)-s.data.Dust
-    if health>0 and room>0 then
-     local previous=health
-     local amount
-     health,amount=Economy.Scrub(s.data,health,power,dt,distance,radius)
-     total+=amount; touched+=1
-     patch:SetAttribute('Health',health); patch.Transparency=1-health/C.PatchHealth
-     -- Invisible patches remain queryable so a brush can sweep through cleaned areas.
-     if health==0 and previous>0 then
-      deckState[deck].remaining-=1
-      if deckState[deck].remaining==0 then deckState[deck].resetAt=now+C.ResetSeconds end
-     end
+    -- Raycast only the small brush neighborhood. This follows the generated voxel
+    -- surface, rejects cliffs, and never trusts client coating Parts as reward targets.
+    local geometryKey=key..'/'..cell
+    local surface=surfaceGeometry[geometryKey]
+    if surface==nil then
+     surface=workspace:Raycast(Vector3.new(x,80,z),Vector3.new(0,-160,0),terrainParams) or false
+     surfaceGeometry[geometryKey]=surface
+    end
+    if surface and surface.Normal.Y>=0.35 and (surface.Position-center).Magnitude<=radius+C.PatchSize*0.55 then
+     local nextHealth,amount=Economy.Scrub(s.data,health,power,dt,distance,radius)
+     if amount>0 then World.Set(key,cell,nextHealth); total+=amount end
     end
    end
   end
  end end
  if total>0 then
-  sync(p,s); net.Feedback:FireClient(p,'Scrub',{Position=center,Amount=total,Deck=deck,
-   Progress=1-deckState[deck].remaining/(C.Rows*C.Columns)})
- end
-end)
-task.spawn(function()
- while not closing do
-  task.wait(1)
-  for deck,state in pairs(deckState) do
-   map:SetAttribute('Progress'..deck,1-state.remaining/(C.Rows*C.Columns))
-   if state.resetAt>0 and os.clock()>=state.resetAt then
-    for _,patch in pairs(patches) do if patch:GetAttribute('Deck')==deck then
-     patch:SetAttribute('Health',C.PatchHealth); patch.Transparency=0
-    end end
-    state.remaining=C.Rows*C.Columns; state.resetAt=0
-   end
-  end
+  sync(p,s); net.Feedback:FireClient(p,'Scrub',{Position=center,Amount=total,Region=regionId})
  end
 end)
 task.spawn(function()
@@ -657,7 +992,8 @@ task.spawn(function()
  end
 end)
 game:BindToClose(function()
- closing=true; local pending=0
+ closing=true; World.Active=false; local pending=1
+ task.spawn(function() while World.Saving do task.wait(0.1) end; World.Save(true); pending-=1 end)
  for p in pairs(profiles) do
   pending+=1; task.spawn(function()
    local s=profiles[p]; while s and s.saving do task.wait(0.1) end
@@ -668,6 +1004,7 @@ game:BindToClose(function()
  while pending>0 and os.clock()<deadline do task.wait(0.1) end
 end)
 ]==]
+surfaceWorld.Parent=server
 server.Parent=ServerScriptService
 local client=Instance.new('LocalScript'); client.Name=NAME
 client.Source=[==[
@@ -676,7 +1013,8 @@ local UIS=game:GetService('UserInputService'); local Run=game:GetService('RunSer
 local player=Players.LocalPlayer; local net=RS:WaitForChild('LunarCleanup'); local C=require(net:WaitForChild('Config'))
 local Environment=require(net:WaitForChild('Environment'))
 Environment.StartClient()
-local map=workspace:WaitForChild('LunarCleanup'); local patches=map:WaitForChild('Patches')
+local map=workspace:WaitForChild('LunarCleanup')
+local Surface=require(net:WaitForChild('SurfaceRender')); Surface.Start()
 
 local gui=Instance.new('ScreenGui'); gui.Name='LunarCleanupHUD'; gui.ResetOnSpawn=false; gui.IgnoreGuiInset=false
  gui.Parent=player:WaitForChild('PlayerGui')
@@ -708,10 +1046,11 @@ track.BackgroundColor3=Color3.fromRGB(50,60,65); track.BorderSizePixel=0; track.
 local fill=Instance.new('Frame'); fill.Size=UDim2.fromScale(0,1); fill.BorderSizePixel=0
 fill.BackgroundColor3=Color3.fromRGB(179,204,207); fill.Parent=track
 local cross=text(gui,'·',24,UDim2.new(0.5,-7,0.5,-12),UDim2.fromOffset(20,24))
-local progress=text(gui,'AIM AT A RECLAMATION DECK',12,UDim2.new(0.5,-180,0.5,30),UDim2.fromOffset(360,24))
+local progress=text(gui,'AIM AT THE LUNAR SURFACE',11,UDim2.new(0.5,-260,0.5,30),UDim2.fromOffset(520,36))
+progress.TextWrapped=true
 progress.TextXAlignment=Enum.TextXAlignment.Center
 local aimTrack=Instance.new('Frame'); aimTrack.Size=UDim2.fromOffset(180,2)
-aimTrack.Position=UDim2.new(0.5,-90,0.5,60); aimTrack.BorderSizePixel=0
+aimTrack.Position=UDim2.new(0.5,-90,0.5,72); aimTrack.BorderSizePixel=0
 aimTrack.BackgroundColor3=Color3.fromRGB(53,63,67); aimTrack.BackgroundTransparency=0.3; aimTrack.Parent=gui
 local aimFill=Instance.new('Frame'); aimFill.Size=UDim2.fromScale(0,1); aimFill.BorderSizePixel=0
 aimFill.BackgroundColor3=Color3.fromRGB(166,191,190); aimFill.Parent=aimTrack
@@ -761,6 +1100,8 @@ local function refresh()
  end
 end
 player.AttributeChanged:Connect(refresh); refresh()
+local survey=text(gui,'CONNECTING TO LUNAR SURVEY...',11,UDim2.new(1,-310,0,24),UDim2.fromOffset(286,98))
+survey.TextYAlignment=Enum.TextYAlignment.Top; survey.TextColor3=muted
 local toastVersion=0
 local function message(msg)
  toastVersion+=1; local version=toastVersion; toast.Text=msg
@@ -879,17 +1220,17 @@ Run:BindToRenderStep('LunarCleanupCamera',Enum.RenderPriority.Camera.Value+1,fun
  params.FilterDescendantsInstances={char or view,view,puff}
  aimTrack.Visible=false
  local hit=workspace:Raycast(camera.CFrame.Position,camera.CFrame.LookVector*C.Range,params)
- if hit and hit.Instance:IsDescendantOf(patches) then
-  local deck=hit.Instance:GetAttribute('Deck'); local percent=map:GetAttribute('Progress'..deck) or 0
-  aimTrack.Visible=not shop.Visible; aimFill.Size=UDim2.fromScale(percent,1)
-  progress.Text=string.format('DECK 0%d   •   %.0f%% RECLAIMED',deck,percent*100)
+ if hit and hit.Instance==workspace.Terrain then
+  local description,percent=Surface.Describe(hit.Position,math.max(1,value('Tool')))
+  progress.Text=description; aimTrack.Visible=not shop.Visible; aimFill.Size=UDim2.fromScale(percent,1)
   if value('Dust')>=math.max(1,value('Capacity')) then progress.Text='STORAGE FULL — RETURN TO DUST DEPOT' end
- else progress.Text='AIM AT A RECLAMATION DECK' end
+ else progress.Text='AIM AT THE LUNAR SURFACE' end
+ survey.Text=Surface.Summary()
  if scrub and os.clock()-lastSend>=C.Tick then
   lastSend=os.clock(); net.Scrub:FireServer(camera.CFrame.Position,camera.CFrame.LookVector)
  end
 end)
-message('Hold left mouse to scrub. Sell dust at the depot behind you. E opens equipment.')
+message('Scrub the ground ahead. Tools or 5% shared restoration unlock the next region. All terrain is open to exploration.')
 ]==]
 client.Parent=StarterPlayer.StarterPlayerScripts
 print('LUNAR CLEANUP generated. Press Play to test. Enable Studio API access only in a separate test place for persistence testing.')
