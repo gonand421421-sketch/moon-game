@@ -281,7 +281,210 @@ function R.ChunkCellsAt(key)
  end
  return cells
 end
+-- Hex sectors organize the existing immutable grid; they never re-key saved health.
+R.HexRadius=16; R.SectorDrawRadius=54; R.MaxSectorLines=420; R.SectorBuildBudget=70; R.MinNormalY=0.35
+function R.Resolve(x,z)
+ local gx,gz=math.floor(x/C.PatchSize),math.floor(z/C.PatchSize)
+ if gx==0 then gx=0 end; if gz==0 then gz=0 end
+ return R.Cell(gx,gz),gx,gz
+end
+function R.BrushDistance(center,normal,point,pointNormal,radius,isTarget)
+ if pointNormal.Y<R.MinNormalY then return nil end
+ local x,y,z=point.X-center.X,point.Y-center.Y,point.Z-center.Z
+ local distance=math.sqrt(x*x+z*z)
+ if distance>radius+C.PatchSize*0.38 then return nil end
+ -- A 3D sphere erroneously excludes valid coating on a steep plane. Keep the old
+ -- horizontal footprint/falloff, using tangent-plane separation only for neighbors.
+ if not isTarget and math.abs(x*normal.X+y*normal.Y+z*normal.Z)>C.PatchSize*1.5 then return nil end
+ return distance
+end
+function R.SectorAt(x,z)
+ local q=(math.sqrt(3)/3*x-z/3)/R.HexRadius
+ local r=(2/3*z)/R.HexRadius
+ local a,b,c=q,-q-r,r
+ local aa,bb,cc=math.floor(a+0.5),math.floor(b+0.5),math.floor(c+0.5)
+ local da,db,dc=math.abs(aa-a),math.abs(bb-b),math.abs(cc-c)
+ if da>=db and da>=dc then aa=-bb-cc elseif db>=dc then bb=-aa-cc else cc=-aa-bb end
+ -- Canonical integer formatting also eliminates IEEE negative-zero duplicate keys.
+ return string.format('%d:%d',aa,cc),aa,cc
+end
+function R.CellSector(gx,gz) return R.SectorAt((gx+0.5)*C.PatchSize,(gz+0.5)*C.PatchSize) end
+function R.SectorCenter(q,r) return math.sqrt(3)*R.HexRadius*(q+r/2),1.5*R.HexRadius*r end
+function R.SectorName(q,r) return string.format('HX %+03d / %+03d',q,r) end
+function R.BuildSectors(index)
+ local sectors={}
+ for key,chunk in pairs(index) do for id,region in pairs(chunk.Cells) do
+  local gx,gz=R.Unpack(key,id); local sector,q,r=R.CellSector(gx,gz)
+  local entry=sectors[sector]
+  if not entry then entry={Q=q,R=r,Cells=0,Regions={0,0,0},Nearest=math.huge}; sectors[sector]=entry end
+  entry.Cells+=1; entry.Regions[region]+=1
+  local x,z=(gx+0.5)*C.PatchSize,(gz+0.5)*C.PatchSize
+  local cx,cz=R.SectorCenter(q,r); local distance=(x-cx)^2+(z-cz)^2
+  if distance<entry.Nearest then entry.Nearest=distance; entry.X=x; entry.Z=z end
+ end end
+ return sectors
+end
+function R.SectorState(sector,tool,regions)
+ if sector.Progress>=1-1e-7 then return 'COMPLETE' end
+ local yes,no=false,false
+ for id,count in ipairs(sector.Regions) do if count>0 then
+  local previous=id>1 and regions[id-1].Progress or 0
+  if R.Access(id,tool,previous) then yes=true else no=true end
+ end end
+ if not yes then return 'LOCKED' end
+ if no then return 'MIXED ACCESS' end
+ return sector.Progress>0 and 'IN PROGRESS' or 'DIRTY'
+end
+
 return R
+]==]
+
+local sectorView=Instance.new('ModuleScript'); sectorView.Name='SectorView'; sectorView.Parent=net
+sectorView.Source=[==[
+local net=game:GetService('ReplicatedStorage'):WaitForChild('LunarCleanup')
+local R=require(net.Regions)
+local View={}
+local root=Instance.new('Folder'); root.Name='LunarCleanupHexSectors'; root.Parent=workspace
+local lines,labels={},{}
+local params=RaycastParams.new(); params.FilterType=Enum.RaycastFilterType.Include; params.FilterDescendantsInstances={workspace.Terrain}
+local colors={LOCKED=Color3.fromRGB(107,99,90),DIRTY=Color3.fromRGB(148,134,105),['IN PROGRESS']=Color3.fromRGB(113,151,145),['MIXED ACCESS']=Color3.fromRGB(133,132,117),COMPLETE=Color3.fromRGB(190,211,204)}
+local function sample(x,z)
+ local hit=workspace:Raycast(Vector3.new(x,80,z),Vector3.new(0,-160,0),params)
+ return hit and (hit.Position+hit.Normal*0.045)
+end
+local function inert(p)
+ p.Anchored=true; p.CanCollide=false; p.CanTouch=false; p.CanQuery=false; p.CastShadow=false
+end
+function View.Update(status,position,tool)
+ if not status or not position then return end
+ local desiredLines,desiredLabels={},{}; local ordered={}
+ for key,sector in pairs(status.Sectors or {}) do
+  local x,z=R.SectorCenter(sector.Q,sector.R)
+  local distance=math.sqrt((x-position.X)^2+(z-position.Z)^2)
+  if distance<R.SectorDrawRadius then table.insert(ordered,{Key=key,Data=sector,Distance=distance}) end
+ end
+ table.sort(ordered,function(a,b) return a.Distance<b.Distance end)
+ local count=0; local built=0
+ for _,item in ipairs(ordered) do
+  local sector=item.Data; local state=R.SectorState(sector,tool,status.Regions); local color=colors[state]
+  local cx,cz=R.SectorCenter(sector.Q,sector.R)
+  for edge=0,5 do
+   local a,b=math.rad(30+edge*60),math.rad(30+(edge+1)*60)
+   local ax,az=cx+R.HexRadius*math.cos(a),cz+R.HexRadius*math.sin(a)
+   local bx,bz=cx+R.HexRadius*math.cos(b),cz+R.HexRadius*math.sin(b)
+   for j=0,3 do
+    local x1,z1=ax+(bx-ax)*j/4,az+(bz-az)*j/4
+    local x2,z2=ax+(bx-ax)*(j+1)/4,az+(bz-az)*(j+1)/4
+    local _,gx,gz=R.Resolve((x1+x2)/2,(z1+z2)/2)
+    if R.Cell(gx,gz) then
+     local s1=string.format('%.3f:%.3f',x1,z1); local s2=string.format('%.3f:%.3f',x2,z2)
+     local key=s1<s2 and s1..'/'..s2 or s2..'/'..s1
+     if not desiredLines[key] and count<R.MaxSectorLines then
+      desiredLines[key]=true; count+=1
+      local record=lines[key]
+      if not record and built<R.SectorBuildBudget then
+       built+=1
+       local p1,p2=sample(x1,z1),sample(x2,z2)
+       if p1 and p2 then
+        local p=Instance.new('Part'); p.Name='SurveyFilament'; inert(p); p.Material=Enum.Material.Neon
+        p.Size=Vector3.new(0.035,0.018,(p2-p1).Magnitude)
+        p.CFrame=CFrame.lookAt((p1+p2)/2,p2); p.Parent=root; record=p; lines[key]=p
+       end
+      end
+      if record then record.Color=color; record.Transparency=0.48+0.45*math.clamp((item.Distance-38)/16,0,1) end
+     end
+    end
+   end
+  end
+  desiredLabels[item.Key]=true
+  local label=labels[item.Key]
+  if not label then
+   local point=sample(sector.X,sector.Z)
+   if point then
+    local p=Instance.new('Part'); p.Name='SectorIdentifier'; p.Size=Vector3.new(0.05,0.05,0.05); p.Transparency=1
+    inert(p); p.CFrame=CFrame.new(point+Vector3.new(0,0.35,0)); p.Parent=root
+    local gui=Instance.new('BillboardGui'); gui.Size=UDim2.fromOffset(180,42); gui.MaxDistance=65; gui.AlwaysOnTop=false; gui.Parent=p
+    local text=Instance.new('TextLabel'); text.Size=UDim2.fromScale(1,1); text.BackgroundTransparency=1
+    text.Font=Enum.Font.GothamMedium; text.TextSize=10; text.TextStrokeTransparency=0.65; text.Parent=gui
+    label={Part=p,Text=text}; labels[item.Key]=label
+   end
+  end
+  if label then label.Text.Text=string.format('%s   %.1f%%\n%s',R.SectorName(sector.Q,sector.R),sector.Progress*100,state); label.Text.TextColor3=color end
+ end
+ for key,p in pairs(lines) do if not desiredLines[key] then p:Destroy(); lines[key]=nil end end
+ for key,label in pairs(labels) do if not desiredLabels[key] then label.Part:Destroy(); labels[key]=nil end end
+end
+return View
+]==]
+
+local celestial=Instance.new('ModuleScript'); celestial.Name='Celestial'; celestial.Parent=net
+celestial.Source=[==[
+-- Original primitive Earth illustration and a sparse star field. No Lighting/Sky mutation.
+local Run=game:GetService('RunService')
+local Celestial={}
+function Celestial.Start()
+ local model=Instance.new('Model'); model.Name='LunarCleanupCelestial'
+ local function piece(name,size,cf,color,material)
+  local p=Instance.new('Part'); p.Name=name; p.Size=size; p.CFrame=cf; p.Color=color
+  p.Material=material or Enum.Material.SmoothPlastic; p.Anchored=true; p.CanCollide=false
+  p.CanTouch=false; p.CanQuery=false; p.CastShadow=false; p.Parent=model; return p
+ end
+ local anchor=piece('Reference',Vector3.new(0.05,0.05,0.05),CFrame.new(),Color3.new(0,0,0)); anchor.Transparency=1; model.PrimaryPart=anchor
+ local direction=Vector3.new(-0.55,0.45,-0.7).Unit
+ local earthFrame=CFrame.lookAt(direction*220,Vector3.zero)
+ local radius=7
+ local earth=piece('EarthOcean',Vector3.new(radius*2,radius*2,radius*2),earthFrame,Color3.fromRGB(24,62,93)); earth.Shape=Enum.PartType.Ball
+ -- Hand-authored, low-resolution geographic silhouettes; not copied textures/models.
+ local continents={
+  {{-17,37},{10,37},{35,30},{50,11},{42,-15},{30,-35},{17,-35},{8,-10},{-14,5},{-17,20}},
+  {{-10,36},{-10,60},{25,73},{70,75},{130,63},{178,63},{160,40},{120,20},{100,0},{75,7},{50,30},{20,38}},
+  {{-165,70},{-125,72},{-53,47},{-80,9},{-102,15},{-120,33},{-155,58}},
+  {{-81,12},{-50,7},{-35,-8},{-55,-55},{-74,-42},{-80,-3}},
+  {{113,-12},{145,-10},{154,-25},{145,-40},{115,-35}},
+  {{-55,59},{-25,70},{-40,82},{-65,78}},
+ }
+ local function inside(x,y,poly)
+  local hit=false; local j=#poly
+  for i=1,#poly do
+   local a,b=poly[i],poly[j]
+   if (a[2]>y)~=(b[2]>y) and x<(b[1]-a[1])*(y-a[2])/(b[2]-a[2])+a[1] then hit=not hit end
+   j=i
+  end
+  return hit
+ end
+ for lat=-81,81,9 do for lon=-180,171,9 do
+  local land=false; for _,poly in ipairs(continents) do if inside(lon,lat,poly) then land=true; break end end
+  if land or math.abs(lat)>72 then
+   local a,b=math.rad(lat),math.rad(lon-20)
+   local n=Vector3.new(math.cos(a)*math.sin(b),math.sin(a),-math.cos(a)*math.cos(b))
+   local point=n*(radius+0.025)
+   local color=math.abs(lat)>72 and Color3.fromRGB(191,202,199) or (lat>15 and lat<32 and lon>-20 and lon<60 and Color3.fromRGB(133,119,85) or Color3.fromRGB(71,101,80))
+   piece('EarthLand',Vector3.new(radius*math.rad(9)*math.cos(a)*1.14,radius*math.rad(9)*1.14,0.025),earthFrame*CFrame.lookAt(point,point+n),color)
+  end
+ end end
+ local lamp=piece('EarthLight',Vector3.new(0.05,0.05,0.05),earthFrame*CFrame.new(-10,8,-16),Color3.new(1,1,1)); lamp.Transparency=1
+ local light=Instance.new('PointLight'); light.Range=45; light.Brightness=1.4; light.Shadows=false; light.Parent=lamp
+ for i=1,110 do
+  local y=1-2*(i-0.5)/110; local theta=i*2.39996323
+  local n=Vector3.new(math.sqrt(1-y*y)*math.cos(theta),y,math.sqrt(1-y*y)*math.sin(theta))
+  if y>0.08 and n:Dot(direction)<0.993 then
+   local size=0.08+(i%4)*0.025
+   local star=piece('Star',Vector3.new(size,size,size),CFrame.new(n*190),Color3.fromRGB(106+i%30,111+i%30,118+i%30),Enum.Material.Neon)
+   star.Shape=Enum.PartType.Ball
+  end
+ end
+ -- Astronomical direction stays fixed: translate with the observer, never with head rotation.
+ local camera=workspace.CurrentCamera
+ model:PivotTo(CFrame.new(camera and camera.CFrame.Position or Vector3.zero)); model.Parent=workspace
+ local previous
+ Run:BindToRenderStep('LunarCleanupCelestial',Enum.RenderPriority.Camera.Value+2,function()
+  local current=workspace.CurrentCamera
+  if current and (not previous or (current.CFrame.Position-previous).Magnitude>0.1) then
+   previous=current.CFrame.Position; model:PivotTo(CFrame.new(previous))
+  end
+ end)
+end
+return Celestial
 ]==]
 
 local surfaceRender=Instance.new('ModuleScript'); surfaceRender.Name='SurfaceRender'
@@ -290,6 +493,7 @@ surfaceRender.Source=[==[
 local Players=game:GetService('Players')
 local net=game:GetService('ReplicatedStorage'):WaitForChild('LunarCleanup')
 local C=require(net.Config); local R=require(net.Regions)
+local SectorView=require(net.SectorView)
 local Render={Status=nil}
 local chunks,metadata,visuals,pool={},{},{},{}
 local retryAt={}
@@ -325,16 +529,22 @@ local function accessible(id,tool)
  local previous=id>1 and status and status.Regions[id-1].Progress or 0
  return R.Access(id,tool,previous)
 end
-function Render.Describe(position,tool)
- local id=R.At(position.X,position.Z)
+function Render.Describe(position,tool,normal)
+ if normal and normal.Y<R.MinNormalY then return 'STEEP ROCK FACE — NO CLEANABLE COATING',0 end
+ local id,gx,gz=R.Resolve(position.X,position.Z)
  if not id then return 'UNSURVEYED REGOLITH',0 end
  local definition=R.Definitions[id]
- if not accessible(id,tool) then return definition.Name..'  /  '..C.Tools[definition.Tool].Name..' OR 5% OF PREVIOUS REGION',0 end
+ if not accessible(id,tool) then return 'LOCKED — '..definition.Name..'\n'..C.Tools[definition.Tool].Name..' OR 5% OF PREVIOUS REGION',0 end
  local status=Render.Status
  if not status or not status.Ready then return definition.Name..'  /  LOADING SURVEY',0 end
  if not status.Writable then return 'SURFACE SAVING UNAVAILABLE — CLEANING PAUSED',0 end
- local progress=status.Regions[id].Progress
- return string.format('%s  /  %.1f%% RESTORED',definition.Name,progress*100),progress
+ local key,cell=R.Chunk(gx,gz)
+ if not chunks[key] then return 'SYNCING GROUND — PLEASE WAIT',0 end
+ local sectorKey=R.CellSector(gx,gz); local sector=status.Sectors and status.Sectors[sectorKey]
+ local progress=sector and sector.Progress or status.Regions[id].Progress
+ local state=sector and R.SectorState(sector,tool,status.Regions) or 'SYNCING'
+ local target=(chunks[key][cell] or C.PatchHealth)<=0 and 'CLEAN GROUND' or 'COATED GROUND'
+ return string.format('%s  /  %.1f%%  /  %s\n%s — %s',sector and R.SectorName(sector.Q,sector.R) or 'SURVEY',progress*100,state,definition.Name,target),progress
 end
 function Render.Summary()
  local status=Render.Status
@@ -351,6 +561,13 @@ function Render.Summary()
 end
 function Render.Start()
  local player=Players.LocalPlayer
+ task.spawn(function()
+  while folder.Parent do
+   local root=player.Character and player.Character:FindFirstChild('HumanoidRootPart')
+   if root then SectorView.Update(Render.Status,root.Position,player:GetAttribute('Tool') or 1) end
+   task.wait(0.8)
+  end
+ end)
  task.spawn(function()
   while folder.Parent do net.Surface:FireServer('Subscribe'); task.wait(0.8) end
  end)
@@ -371,7 +588,7 @@ function Render.Start()
       local health=metadata[key] and metadata[key][id] and chunks[key] and (chunks[key][id] or C.PatchHealth)
       if health and health>0 then
        local cellKey=x..':'..z
-       table.insert(candidates,{Key=cellKey,X=px,Z=pz,Distance=math.sqrt(dist2),Health=health})
+       table.insert(candidates,{Key=cellKey,X=px,Z=pz,Distance=math.sqrt(dist2),Health=health,Region=metadata[key][id]})
       end
      end
     end end
@@ -386,7 +603,7 @@ function Render.Start()
       built+=1
       -- Query the actual streamed voxel surface, not the analytic height approximation.
       local hit=workspace:Raycast(Vector3.new(item.X,80,item.Z),Vector3.new(0,-160,0),terrainParams)
-      if hit and hit.Normal.Y>=0.35 then
+      if hit and hit.Normal.Y>=R.MinNormalY then
        local normal=hit.Normal
        local right=(Vector3.new(1,0,0)-normal*normal.X).Unit
        local back=right:Cross(normal).Unit
@@ -397,13 +614,15 @@ function Render.Start()
        p.CFrame=CFrame.fromMatrix(hit.Position+normal*0.025,right,normal,back)
        local shade=math.floor(73+math.noise(item.X/7,item.Z/7,4)*12)
        p.Color=Color3.fromRGB(shade,shade-1,shade-2); p.Transparency=1; p.Parent=folder
-       record={Part=p,Born=now}; visuals[item.Key]=record; retryAt[item.Key]=nil
+       record={Part=p,Born=now,Shade=shade}; visuals[item.Key]=record; retryAt[item.Key]=nil
       else
        -- Missing streamed Terrain or a cliff must not starve all farther candidates.
        retryAt[item.Key]=now+(hit and 3 or 0.5)
       end
      end
      if record then
+      local shade=record.Shade; local locked=not accessible(item.Region,player:GetAttribute('Tool') or 1)
+      record.Part.Color=locked and Color3.fromRGB(shade+6,shade+1,shade-6) or Color3.fromRGB(shade,shade-1,shade-2)
       local fade=math.clamp((radius-item.Distance)/R.EdgeFade,0,1)
       fade=fade*fade*(3-2*fade)
       record.Part.Transparency=1-(item.Health/C.PatchHealth)*fade*math.clamp((now-record.Born)/0.2,0,1)
@@ -425,6 +644,7 @@ local net=game:GetService('ReplicatedStorage'):WaitForChild('LunarCleanup')
 local C=require(net.Config); local R=require(net.Regions)
 local World={Ready=false,Persistent=false,Slot=0,Active=true,Saving=false,Lost=false,Lease=0}
 local index,totals=R.BuildIndex()
+local sectors=R.BuildSectors(index); local sectorRemoved={}
 local storeOK,store=pcall(function() return DSS:GetDataStore('LunarCleanup_Surface_v1') end)
 if not storeOK then warn('Lunar surface store initialization unavailable: '..tostring(store)); store=nil end
 local encoded,live,dirty,changes={},{},{},{}
@@ -435,12 +655,20 @@ local function chunk(key)
  if not live[key] then live[key]=R.Decode(encoded[key],index[key].Cells) end
  return live[key]
 end
-function World.Stats()
+function World.Stats(position)
  local stats={}
  for i,definition in ipairs(R.Definitions) do
   stats[i]={Name=definition.Name,Tool=definition.Tool,Progress=math.clamp(removed[i]/math.max(1,totals[i]*C.PatchHealth),0,1),Cells=totals[i]}
  end
- return {Regions=stats,Slot=World.Slot,Persistent=World.Persistent,Ready=World.Ready,Writable=World.CanScrub()}
+ local nearby={}
+ for key,sector in pairs(sectors) do
+  local x,z=R.SectorCenter(sector.Q,sector.R)
+  if not position or (x-position.X)^2+(z-position.Z)^2<(R.SectorDrawRadius+R.HexRadius)^2 then
+   nearby[key]={Q=sector.Q,R=sector.R,X=sector.X,Z=sector.Z,Cells=sector.Cells,Regions=sector.Regions,
+    Progress=math.clamp((sectorRemoved[key] or 0)/(sector.Cells*C.PatchHealth),0,1)}
+  end
+ end
+ return {Regions=stats,Sectors=nearby,Slot=World.Slot,Persistent=World.Persistent,Ready=World.Ready,Writable=World.CanScrub()}
 end
 function World.CanScrub()
  return World.Ready and not World.Lost and (not World.Persistent or os.time()<World.Lease-15)
@@ -461,6 +689,8 @@ function World.Set(key,id,value)
  value=math.clamp(value,0,previous) -- monotonic; only a new world/region can add new dirt.
  if value==previous then return end
  health[id]=value; removed[meta.Cells[id]]+=previous-value; dirty[key]=true
+ local gx,gz=R.Unpack(key,id); local sector=R.CellSector(gx,gz)
+ sectorRemoved[sector]=(sectorRemoved[sector] or 0)+previous-value
  changes[key]=changes[key] or {}; changes[key][id]=value
 end
 local function copyEncoded()
@@ -504,7 +734,11 @@ function World.Start(session)
     if index[key] and type(value)=='string' then
      encoded[key]=value
      local values=R.Decode(value,index[key].Cells)
-     for id,h in pairs(values) do removed[index[key].Cells[id]]+=C.PatchHealth-h end
+     for id,h in pairs(values) do
+      removed[index[key].Cells[id]]+=C.PatchHealth-h
+      local gx,gz=R.Unpack(key,id); local sector=R.CellSector(gx,gz)
+      sectorRemoved[sector]=(sectorRemoved[sector] or 0)+C.PatchHealth-h
+     end
     end
    end
    break
@@ -541,7 +775,7 @@ net.Surface.OnServerEvent:Connect(function(player,action)
  end end
  -- No cached 'loaded' subscriptions before world loading, so the next request sends snapshots.
  subscriptions[player]=World.Ready and new or {}
- send(player,'Snapshot',{Keep=keep,Chunks=snapshots,Status=World.Stats()})
+ send(player,'Snapshot',{Keep=keep,Chunks=snapshots,Status=World.Stats(root.Position)})
 end)
 Players.PlayerRemoving:Connect(function(player) subscriptions[player]=nil; requestTimes[player]=nil end)
 task.spawn(function()
@@ -682,12 +916,16 @@ for i=1,200 do
   if i%3==0 then
    local wedge=Instance.new('WedgePart'); wedge.Name='RockFracture'; wedge.Size=rock.Size*0.7
    wedge.CFrame=rock.CFrame*CFrame.new(scale*0.6,0,0); wedge.Color=rock.Color
-   wedge.Material=Enum.Material.Rock; wedge.Anchored=true; wedge.CanQuery=false; wedge.Parent=map
+   wedge.Material=Enum.Material.Rock; wedge.Anchored=true; wedge.CanCollide=false; wedge.CanTouch=false; wedge.CanQuery=false; wedge.Parent=map
   end
  end
 end
 -- Raised expedition habitat with thermal ribs, airlock seals and service fittings.
-part('BaseFoundation',Vector3.new(36,1,18),CFrame.new(0,0.5,23),dark,Enum.Material.DiamondPlate)
+local baseParams=RaycastParams.new(); baseParams.FilterType=Enum.RaycastFilterType.Include; baseParams.FilterDescendantsInstances={terrain}
+local baseHit=Workspace:Raycast(Vector3.new(0,80,23),Vector3.new(0,-160,0),baseParams)
+local baseTop=(baseHit and baseHit.Position.Y or groundHeight(0,23))+0.08
+local beforeBase={}; for _,child in ipairs(map:GetChildren()) do beforeBase[child]=true end
+local foundation=part('BaseFoundation',Vector3.new(36,0.45,18),CFrame.new(0,baseTop-0.225,23),dark,Enum.Material.DiamondPlate)
 part('Habitat',Vector3.new(16,9,10),CFrame.new(0,5.5,27),pale)
 detail('ThermalRoof',Vector3.new(18,0.8,12),CFrame.new(0,10.4,27),Color3.fromRGB(181,180,169))
 for _,x in ipairs({-8.2,-4.1,0,4.1,8.2}) do
@@ -701,9 +939,6 @@ for _,x in ipairs({-5.5,5.5}) do
  local w=detail('Window',Vector3.new(2.9,2,0.2),CFrame.new(x,6,21.45),Color3.fromRGB(76,94,101),Enum.Material.Glass)
  w.Reflectance=0.12
  for i=1,3 do detail('WindowBrace',Vector3.new(0.06,2,0.09),CFrame.new(x-1.45+i*0.72,6,21.3),pale) end
-end
-for i=1,4 do
- detail('AirlockStep',Vector3.new(5,0.18,0.7),CFrame.new(0,0.1+i*0.2,19.1+i*0.6),dark,Enum.Material.DiamondPlate)
 end
 -- Keep the authoritative Depot and Terminal anchors and prompt positions unchanged.
 local depot=part('Depot',Vector3.new(6,4,4),CFrame.new(-12,3,20),dark)
@@ -727,6 +962,45 @@ for _,x in ipairs({9.9,14.1}) do detail('TerminalCheek',Vector3.new(0.2,4,3.2),C
 local display=detail('DiagnosticScreen',Vector3.new(3.4,0.75,0.1),CFrame.new(12,4.45,18.43),Color3.fromRGB(32,50,54),Enum.Material.Neon)
 label(display,'SYSTEM READY  /  LC-03')
 for i=1,6 do detail('TerminalVent',Vector3.new(0.1,0.6,0.08),CFrame.new(10.7+i*0.37,1.7,18.44),pale) end
+-- A recognizable equipment workshop, built around the SAME interaction anchor.
+part('WorkshopDeck',Vector3.new(15,0.3,12),CFrame.new(15,0.85,24),dark,Enum.Material.DiamondPlate)
+for _,x in ipairs({8,22}) do for _,z in ipairs({19,29}) do
+ detail('WorkshopColumn',Vector3.new(0.35,6.8,0.35),CFrame.new(x,4.4,z),pale)
+end end
+local canopy=detail('WorkshopCanopy',Vector3.new(16,0.4,12),CFrame.new(15,8,24),Color3.fromRGB(142,147,145))
+for i=0,4 do detail('RoofRib',Vector3.new(0.12,0.25,12),CFrame.new(8+i*3.5,8.3,24),dark) end
+detail('WorkshopRear',Vector3.new(14,5.8,0.25),CFrame.new(15,4,29.4),Color3.fromRGB(87,96,98))
+local workshopSign=detail('WorkshopSign',Vector3.new(12,1,0.16),CFrame.new(15,7.1,18.1),Color3.fromRGB(28,42,47),Enum.Material.Neon)
+label(workshopSign,'LC / SURFACE EQUIPMENT WORKSHOP')
+local lamp=detail('WorkshopTaskStrip',Vector3.new(7,0.08,0.15),CFrame.new(15,7.55,23),Color3.fromRGB(198,209,201),Enum.Material.Neon)
+local light=Instance.new('PointLight'); light.Brightness=0.8; light.Range=17; light.Shadows=false; light.Color=lamp.Color; light.Parent=lamp
+for _,x in ipairs({10,15,20}) do
+ detail('EquipmentRack',Vector3.new(3.5,3.6,0.5),CFrame.new(x,3.4,28.8),dark)
+ for _,y in ipairs({1.8,3.1,4.7}) do detail('RackShelf',Vector3.new(3.7,0.12,1),CFrame.new(x,y,28.5),pale) end
+end
+for tier,x in ipairs({10,15,20}) do
+ detail('DisplayHandle',Vector3.new(0.12+tier*0.035,1.5,0.14),CFrame.new(x,3.8,28.1)*CFrame.Angles(0,0,-0.25),pale)
+ local head=detail('DisplayBrushHead',Vector3.new(0.22+tier*0.25,0.24,0.35+tier*0.1),CFrame.new(x+0.18,4.6,28.1),dark)
+ for j=1,4+tier do detail('DisplayBristle',Vector3.new(0.05,0.13,0.24),CFrame.new(x-0.1+j*0.07,4.43,28.05),Color3.fromRGB(176,173,155)) end
+ local plate=detail('ToolSpecification',Vector3.new(3.3,0.75,0.08),CFrame.new(x,2.3,28.15),dark)
+ label(plate,C.Tools[tier].Name..'\n'..(tier==1 and 'ISSUED EQUIPMENT' or ('$'..C.Tools[tier].Price..' / TERMINAL')))
+end
+detail('CalibrationBench',Vector3.new(3.2,0.3,4),CFrame.new(20,2.4,23),pale)
+for _,x in ipairs({18.7,21.3}) do detail('BenchLeg',Vector3.new(0.18,1.3,3),CFrame.new(x,1.7,23),dark) end
+rod('CalibrationMotor',Vector3.new(20,2.9,22.3),Vector3.new(20,2.9,24),0.38,dark)
+for _,z in ipairs({22.4,23.7}) do rod('MotorBand',Vector3.new(20,2.9,z),Vector3.new(20,2.9,z+0.1),0.42,pale) end
+local diagnostics=detail('WorkshopDiagnostics',Vector3.new(2.5,1.4,0.12),CFrame.new(20,4.1,24.7),Color3.fromRGB(26,45,49),Enum.Material.Neon)
+label(diagnostics,'BRISTLE CALIBRATION\nVACUUM SEALED / READY')
+rod('WorkshopFeed',Vector3.new(22,1.2,25),Vector3.new(22,6.8,25),0.1,dark)
+-- Lower the complete base ensemble together, so machinery does not float after
+-- correcting the old 1.6-stud difference between Terrain and the platform top.
+local shift=Vector3.new(0,baseTop-1,0)
+for _,child in ipairs(map:GetChildren()) do
+ if child:IsA('BasePart') and not beforeBase[child] and child~=foundation then child.CFrame=child.CFrame+shift end
+end
+for _,z in ipairs({13.5,32.5}) do
+ local apron=detail('RegolithApron',Vector3.new(36,0.04,1.6),CFrame.new(0,baseTop-0.06,z),Color3.fromRGB(112,113,115),Enum.Material.Sand)
+end
 -- Cables run at the back and sides; no decoration covers the cleanable grid.
 for _,x in ipairs({-21,21}) do
  local a=Vector3.new(x,0.07,-6); local b=Vector3.new(x,0.07,18)
@@ -770,7 +1044,8 @@ for _, entry in ipairs({{depot,'Sell','Sell lunar dust'},{terminal,'Upgrade','Op
  prompt.MaxActivationDistance=10; prompt.RequiresLineOfSight=true; prompt.Parent=entry[1]
 end
 local spawn=Instance.new('SpawnLocation'); spawn.Name='Arrival'; spawn.Size=Vector3.new(5,0.2,5)
-spawn.CFrame=CFrame.new(0,1.2,15); spawn.Transparency=1; spawn.Anchored=true; spawn.Neutral=true
+spawn.CFrame=CFrame.new(0,baseTop+0.3,15); spawn.Transparency=1; spawn.Anchored=true; spawn.Neutral=true
+spawn.CanCollide=false; spawn.CanQuery=false; spawn.CanTouch=false
 spawn.Duration=0; spawn.Parent=map
 -- Survey definitions replace the three framed maintenance decks. All cleaning
 -- visuals are local terrain-aligned coating; no server-side Part per surface cell.
@@ -943,17 +1218,20 @@ net.Scrub.OnServerEvent:Connect(function(p,origin,direction)
  if s.data.Dust>=C.Capacity(s.data.Storage) then return end
  local params=RaycastParams.new(); params.FilterType=Enum.RaycastFilterType.Exclude; params.FilterDescendantsInstances={char}
  local hit=workspace:Raycast(origin,direction*C.Range,params)
- if not hit or hit.Instance~=workspace.Terrain or hit.Normal.Y<0.35 or not World.CanScrub() then return end
+ if not hit or not World.CanScrub() then return end
+ if hit.Instance~=workspace.Terrain then
+  if now-(s.lastHint or -math.huge)>2 then s.lastHint=now; tell(p,'Aim at exposed lunar ground — a structure or rock is blocking the brush.') end
+  return
+ end
+ if hit.Normal.Y<R.MinNormalY then return end
  if (head.Position-hit.Position).Magnitude>C.Range then return end
  local sight=workspace:Raycast(head.Position,hit.Position-head.Position,params)
  -- Terrain is one Instance: compare hit positions, not only Instance identity.
  if sight and (sight.Position-hit.Position).Magnitude>0.12 then return end
  local tool=C.Tools[s.data.Tool]; local radius=tool.Radius*(1+C.RadiusPerLevel*s.data.Radius)
  local power=tool.Power*(1+C.SpeedPerLevel*s.data.Speed)
- local center=hit.Position; local regionId=R.At(center.X,center.Z)
- if not regionId or not World.Access(regionId,s.data.Tool) then return end
+ local center=hit.Position; local regionId,cx,cz=R.Resolve(center.X,center.Z)
  local total=0
- local cx,cz=math.floor(center.X/C.PatchSize),math.floor(center.Z/C.PatchSize)
  local steps=math.ceil((radius+C.PatchSize)/C.PatchSize)
  local terrainParams=RaycastParams.new(); terrainParams.FilterType=Enum.RaycastFilterType.Include
  terrainParams.FilterDescendantsInstances={workspace.Terrain}
@@ -972,13 +1250,17 @@ net.Scrub.OnServerEvent:Connect(function(p,origin,direction)
      surface=workspace:Raycast(Vector3.new(x,80,z),Vector3.new(0,-160,0),terrainParams) or false
      surfaceGeometry[geometryKey]=surface
     end
-    if surface and surface.Normal.Y>=0.35 and (surface.Position-center).Magnitude<=radius+C.PatchSize*0.55 then
-     local nextHealth,amount=Economy.Scrub(s.data,health,power,dt,distance,radius)
+    local brushDistance=surface and R.BrushDistance(center,hit.Normal,surface.Position,surface.Normal,radius,gx==cx and gz==cz)
+    if brushDistance then
+     local nextHealth,amount=Economy.Scrub(s.data,health,power,dt,brushDistance,radius)
      if amount>0 then World.Set(key,cell,nextHealth); total+=amount end
     end
    end
   end
  end end
+ if total==0 and regionId and not World.Access(regionId,s.data.Tool) and now-(s.lastHint or -math.huge)>2 then
+  s.lastHint=now; tell(p,'LOCKED: '..R.Definitions[regionId].Name..'. Use '..C.Tools[R.Definitions[regionId].Tool].Name..' or restore 5% of the previous region.')
+ end
  if total>0 then
   sync(p,s); net.Feedback:FireClient(p,'Scrub',{Position=center,Amount=total,Region=regionId})
  end
@@ -1013,6 +1295,7 @@ local UIS=game:GetService('UserInputService'); local Run=game:GetService('RunSer
 local player=Players.LocalPlayer; local net=RS:WaitForChild('LunarCleanup'); local C=require(net:WaitForChild('Config'))
 local Environment=require(net:WaitForChild('Environment'))
 Environment.StartClient()
+require(net:WaitForChild('Celestial')).Start()
 local map=workspace:WaitForChild('LunarCleanup')
 local Surface=require(net:WaitForChild('SurfaceRender')); Surface.Start()
 
@@ -1058,20 +1341,21 @@ local hint=text(gui,'HOLD LEFT MOUSE · SCRUB     |     E · DEPOT / EQUIPMENT',
 hint.TextXAlignment=Enum.TextXAlignment.Center; hint.TextColor3=muted
 local toast=text(gui,'',14,UDim2.new(0.5,-320,0,24),UDim2.fromOffset(640,64))
 toast.TextXAlignment=Enum.TextXAlignment.Center; toast.TextWrapped=true
-local shop=panel(UDim2.fromOffset(400,360),UDim2.new(0.5,-200,0.5,-180)); shop.Visible=false
-text(shop,'EQUIPMENT TERMINAL',18,UDim2.fromOffset(22,16),UDim2.fromOffset(355,30))
-text(shop,'Stand near terminal to purchase.  [TAB] close',12,UDim2.fromOffset(22,48),UDim2.fromOffset(360,25))
+local shop=panel(UDim2.fromOffset(500,486),UDim2.new(0.5,-250,0.5,-243)); shop.Visible=false
+text(shop,'SURFACE EQUIPMENT WORKSHOP',18,UDim2.fromOffset(22,16),UDim2.fromOffset(460,30))
+local shopBalance=text(shop,'',12,UDim2.fromOffset(22,48),UDim2.fromOffset(460,26))
 local buttons={}
 for index,key in ipairs({'Tool','Speed','Radius','Storage'}) do
- local b=Instance.new('TextButton'); b.Position=UDim2.fromOffset(22,82+(index-1)*60)
- b.Size=UDim2.fromOffset(356,50); b.BackgroundColor3=Color3.fromRGB(37,47,54); b.BorderSizePixel=0
- b.Font=Enum.Font.GothamMedium; b.TextSize=13; b.TextColor3=white; b.Parent=shop
+ local b=Instance.new('TextButton'); b.Position=UDim2.fromOffset(22,86+(index-1)*88)
+ b.Size=UDim2.fromOffset(456,78); b.BackgroundColor3=Color3.fromRGB(37,47,54); b.BorderSizePixel=0
+ b.Font=Enum.Font.GothamMedium; b.TextSize=12; b.TextColor3=white; b.TextWrapped=true; b.TextXAlignment=Enum.TextXAlignment.Left; b.Parent=shop
+ local padding=Instance.new('UIPadding'); padding.PaddingLeft=UDim.new(0,12); padding.PaddingRight=UDim.new(0,10); padding.Parent=b
  local corner=Instance.new('UICorner'); corner.CornerRadius=UDim.new(0,4); corner.Parent=b
  local edge=Instance.new('UIStroke'); edge.Color=Color3.fromRGB(80,98,105); edge.Transparency=0.65; edge.Parent=b
  b.Activated:Connect(function() net.Action:FireServer(key) end); buttons[key]=b
 end
-local close=Instance.new('TextButton'); close.Text='CLOSE'; close.Size=UDim2.fromOffset(356,28)
-close.Position=UDim2.fromOffset(22,324); close.BackgroundTransparency=1; close.TextColor3=muted
+local close=Instance.new('TextButton'); close.Text='CLOSE  /  TAB'; close.Size=UDim2.fromOffset(456,28)
+close.Position=UDim2.fromOffset(22,447); close.BackgroundTransparency=1; close.TextColor3=muted
 close.Font=Enum.Font.GothamMedium; close.TextSize=12; close.Parent=shop
 local holding=false
 local function setShop(open)
@@ -1088,6 +1372,7 @@ local function refresh()
  fill.Size=UDim2.fromScale(math.clamp(value('Dust')/cap,0,1),1)
  fill.BackgroundColor3=value('Dust')>=cap and Color3.fromRGB(214,174,112) or Color3.fromRGB(179,204,207)
  local tier=math.max(1,value('Tool')); toolText.Text=C.Tools[tier].Name..(player:GetAttribute('Persistent')==false and '  |  SESSION ONLY' or '')
+ shopBalance.Text='$'..value('Money')..' CREDITS   /   OWNED EQUIPMENT & NEXT UPGRADES'
  for key,b in pairs(buttons) do
   local level=value(key); local cost; local title
   if key=='Tool' then
@@ -1096,7 +1381,13 @@ local function refresh()
    local list=key=='Speed' and C.SpeedPrices or key=='Radius' and C.RadiusPrices or C.StoragePrices
    cost=list[level+1]; title=string.upper(key)..'  '..level..' → '..(level+1)
   end
-  b.Text=title..(cost and ('     $'..cost) or '     MAXED')
+  local description
+  if key=='Tool' then description='OWNED: '..C.Tools[tier].Name..' / Next brush increases coverage and cleaning power.'
+  elseif key=='Speed' then description=string.format('OWNED: LEVEL %d / Power x%.2f. Each level adds 20%% of base power.',level,1+C.SpeedPerLevel*level)
+  elseif key=='Radius' then description=string.format('OWNED: LEVEL %d / +%d%% base radius. Reach more adjacent dirt.',level,math.floor(C.RadiusPerLevel*level*100+0.5))
+  else description='OWNED: '..C.Capacity(level)..' DUST / '..(cost and ('Next bag: '..C.Capacity(level+1)..'. Fewer depot trips.') or 'Largest current storage system.') end
+  b.Text=title..'\n'..description..'\n'..(cost and ('$'..cost..'  /  PURCHASE NEXT UPGRADE') or 'FULLY OWNED / MAXIMUM')
+  b.BackgroundColor3=cost and value('Money')>=cost and Color3.fromRGB(43,61,66) or Color3.fromRGB(32,40,46)
  end
 end
 player.AttributeChanged:Connect(refresh); refresh()
@@ -1221,7 +1512,7 @@ Run:BindToRenderStep('LunarCleanupCamera',Enum.RenderPriority.Camera.Value+1,fun
  aimTrack.Visible=false
  local hit=workspace:Raycast(camera.CFrame.Position,camera.CFrame.LookVector*C.Range,params)
  if hit and hit.Instance==workspace.Terrain then
-  local description,percent=Surface.Describe(hit.Position,math.max(1,value('Tool')))
+  local description,percent=Surface.Describe(hit.Position,math.max(1,value('Tool')),hit.Normal)
   progress.Text=description; aimTrack.Visible=not shop.Visible; aimFill.Size=UDim2.fromScale(percent,1)
   if value('Dust')>=math.max(1,value('Capacity')) then progress.Text='STORAGE FULL — RETURN TO DUST DEPOT' end
  else progress.Text='AIM AT THE LUNAR SURFACE' end

@@ -66,8 +66,9 @@ services.Players.LocalPlayer=player
 local Surface=require(net.SurfaceRender)
 net.Surface.OnClientEvent:Fire('Snapshot',reply.Data)
 local label,progress=Surface.Describe(Vector3.new(0,0,-12),1); assert(label:find('TRANQUILITY') and progress>=0)
-local locked=Surface.Describe(Vector3.new(34,0,-66),1); assert(locked:find('REGOLITH BRUSH') and locked:find('5%%'))
+local locked=Surface.Describe(Vector3.new(34,0,-66),1); assert(locked:find('LOCKED') and locked:find('REGOLITH BRUSH') and locked:find('5%%'))
 assert(Surface.Summary():find('SURVEY WORLD 1'))
+assert(Surface.Describe(Vector3.new(0,0,-12),1,Vector3.new(1,0.1,0)):find('NO CLEANABLE COATING'))
 print('WORLD PASS: save/reload, exclusive leases, stale-writer rejection, subscription budget, Studio fallback, published pause, regional HUD gates')
 -- Exercise the actual client's visual loop with synthetic terrain hits and coroutine scheduling.
 -- This checks allocation bounds/cleanup and code paths, not visual fidelity or frame rate.

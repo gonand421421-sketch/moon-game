@@ -1,5 +1,7 @@
 # Regional lunar surface system
 
+Current addendum: **HEX_WORKSHOP_NOTES.md** describes the later cleaning eligibility fixes, derived hex sectors, grounded workshop and local Earth/stars. The frozen economy, underlying regional masks, chunk IDs and sparse saved health described here remain unchanged. The old 3D brush-neighborhood veto and raw-point region permission lookup are corrected in that update; the current static scene has 463 Parts plus separately bounded client visuals.
+
 ## Preserved behavior
 
 The pre-expansion generator is `backups/LunarCleanupGenerator.pre-regional-surface.lua`. The validator compares the new generator against it and requires **byte-for-byte equality** of Config (all cleaning, price, reward, bag and upgrade values), Environment (the tested native black sky), and Economy (fractional reward calculations). It also compares the complete existing account loading/saving, character settings, selling and purchase block. The original three RemoteEvents remain with the same names and arguments. `Surface` is an additional regional subscription/delta event.

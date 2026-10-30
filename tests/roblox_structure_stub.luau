@@ -2,6 +2,7 @@
 local vecMT={}
 vecMT.__index=function(v,k) if k=='Magnitude' then return math.sqrt(v.X*v.X+v.Y*v.Y+v.Z*v.Z) end
  if k=='Unit' then return v/v.Magnitude end
+ if k=='Dot' then return function(a,b) return a.X*b.X+a.Y*b.Y+a.Z*b.Z end end
  if k=='Cross' then return function(a,b) return setmetatable({X=a.Y*b.Z-a.Z*b.Y,Y=a.Z*b.X-a.X*b.Z,Z=a.X*b.Y-a.Y*b.X},vecMT) end end
 end
 vecMT.__add=function(a,b) return setmetatable({X=a.X+b.X,Y=a.Y+b.Y,Z=a.Z+b.Z},vecMT) end
@@ -9,9 +10,10 @@ vecMT.__sub=function(a,b) return setmetatable({X=a.X-b.X,Y=a.Y-b.Y,Z=a.Z-b.Z},ve
 vecMT.__mul=function(a,b) return setmetatable({X=a.X*b,Y=a.Y*b,Z=a.Z*b},vecMT) end
 vecMT.__div=function(a,b) return setmetatable({X=a.X/b,Y=a.Y/b,Z=a.Z/b},vecMT) end
 local Vector3={new=function(x,y,z) return setmetatable({X=x or 0,Y=y or 0,Z=z or 0},vecMT) end}
+Vector3.zero=Vector3.new()
 local Vector3int16=Vector3
 local Vector2={new=function(x,y) return setmetatable({X=x,Y=y},{__index=function(v,k) if k=='Magnitude' then return math.sqrt(v.X*v.X+v.Y*v.Y) end end}) end}
-local cfMT={}; cfMT.__mul=function(a,b) return setmetatable({Position=a.Position+b.Position},cfMT) end
+local cfMT={}; cfMT.__add=function(a,b) return setmetatable({Position=a.Position+b},cfMT) end; cfMT.__mul=function(a,b) return setmetatable({Position=a.Position+b.Position},cfMT) end
 local CFrame={new=function(x,y,z) return setmetatable({Position=type(x)=='table' and x or Vector3.new(x,y,z)},cfMT) end}
 CFrame.Angles=function() return CFrame.new() end
 CFrame.lookAt=function(a,b) return CFrame.new(a) end
@@ -19,6 +21,7 @@ CFrame.fromMatrix=function(position,right,up,back) return setmetatable({Position
 local Color3={fromRGB=function(r,g,b) return {R=r,G=g,B=b} end,new=function(r,g,b) return {R=r,G=g,B=b} end}
 local UDim2={fromScale=function() return {} end,fromOffset=function() return {} end,new=function() return {} end}
 local Enum=setmetatable({},{__index=function(t,k) local e=setmetatable({},{__index=function(_,v) return k..'.'..v end}); rawset(t,k,e); return e end})
+Enum.RenderPriority={Camera={Value=200}}
 local Region3={new=function(a,b) return {Min=a,Max=b} end}; local Region3int16=Region3
 local deferred={}; local spawned={}
 local task={defer=function(fn) table.insert(deferred,fn) end,spawn=function(fn) table.insert(spawned,fn) end,wait=function() coroutine.yield() end}
@@ -57,6 +60,7 @@ end
 local createdPartCount=0
 local Instance={new=function(class) if class=='Part' then createdPartCount+=1 end; return setmetatable({props={Name=class,ClassName=class},children={},attrs={},signals={}},mt) end}
 function methods:FireClient(player,kind,data) table.insert(messages,{Player=player,Kind=kind,Data=data}) end
+function methods:PivotTo(cf) self.LastPivot=cf end
 function methods:GetChildren() return table.clone(self.children) end
 function methods:FindFirstChild(name) for _,c in ipairs(self.children) do if c.Name==name then return c end end end
 function methods:WaitForChild(name) local child=self:FindFirstChild(name); assert(child,'missing reference '..name); return child end
@@ -94,12 +98,14 @@ terrain.WriteVoxels=function(self,r,res,m,o)
  end
  writes+=1
 end
-services.RunService={IsRunning=function() return false end}
+local renderCallbacks={}
+services.RunService={IsRunning=function() return false end,BindToRenderStep=function(_,name,priority,fn) renderCallbacks[name]=fn end}
 local game={GetService=function(_,name) assert(services[name],name); return services[name] end}
 function game:GetDescendants()
  local result={}; for _,service in pairs(services) do if service.GetDescendants then for _,object in ipairs(service:GetDescendants()) do table.insert(result,object) end end end; return result
 end
 local Workspace=services.Workspace; local workspace=Workspace; Workspace.StreamingEnabled=true
+Workspace.Raycast=function(_,origin) return {Position=Vector3.new(origin.X,-0.6,origin.Z),Normal=Vector3.new(0,1,0),Instance=terrain} end
 local baseplate=Instance.new('Part'); baseplate.Name='Baseplate'; baseplate.Parent=Workspace
 local Random={new=function(seed)
  local state=seed
@@ -112,9 +118,9 @@ local require
 local cache={}
 require=function(module)
  if cache[module] then return cache[module] end
- local fn,err=loadstring('local game,workspace,script,require,Instance,Enum,Vector3,CFrame,Color3,task,warn,os,RaycastParams,Vector2 = ...\n'..module.Source)
+ local fn,err=loadstring('local game,workspace,script,require,Instance,Enum,Vector3,CFrame,Color3,task,warn,os,RaycastParams,Vector2,UDim2 = ...\n'..module.Source)
  assert(fn,err)
- local result=fn(game,workspace,module,require,Instance,Enum,Vector3,CFrame,Color3,task,print,fakeOS,RaycastParams,Vector2)
+ local result=fn(game,workspace,module,require,Instance,Enum,Vector3,CFrame,Color3,task,print,fakeOS,RaycastParams,Vector2,UDim2)
  cache[module]=result; return result
 end
 local function generate()
@@ -126,6 +132,10 @@ local function check()
  assert(map.Patches==nil and #map.SurfaceRegions:GetChildren()==3,'plots must be replaced by region metadata')
  assert(map.Depot.Position.X==-12 and map.Terminal.Position.X==12)
  assert(map.Depot.Sell and map.Terminal.Upgrade)
+ assert(math.abs(map.BaseFoundation.Position.Y+map.BaseFoundation.Size.Y/2-(-0.52))<1e-7,'foundation top should sit 0.08 above sampled Terrain')
+ assert(not map.Arrival.CanCollide and not map.Arrival.CanQuery and map.Arrival.Position.Y>-0.52)
+ assert(math.abs(map.Depot.Position.Y-1.48)<1e-7 and math.abs(map.Terminal.Position.Y-1.48)<1e-7,'station bodies must follow the lowered foundation')
+ assert(map.WorkshopCanopy and map.WorkshopDiagnostics)
  local count=0
  local function walk(o) for _,c in ipairs(o:GetChildren()) do if c:IsA('BasePart') then count+=1 end; walk(c) end end
  walk(map)
